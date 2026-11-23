@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-const SCHEMA_VERSION = 1
+const SCHEMA_VERSION = 2
 
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS messages (
@@ -73,6 +73,12 @@ CREATE TABLE IF NOT EXISTS rollover_state (
   PRIMARY KEY (logical_date, scope)
 );
 
+CREATE TABLE IF NOT EXISTS memory_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
 PRAGMA user_version = ${SCHEMA_VERSION};
 `
 
@@ -109,7 +115,7 @@ export function createMemoryStore(dbPath) {
   db.exec('PRAGMA synchronous = NORMAL;')
 
   const currentVersion = db.prepare('PRAGMA user_version').get().user_version
-  if (currentVersion !== SCHEMA_VERSION) {
+  if (currentVersion < SCHEMA_VERSION) {
     db.exec(SCHEMA_SQL)
   }
 
@@ -131,6 +137,21 @@ export function createMemoryStore(dbPath) {
     ORDER BY seq DESC, id DESC
     LIMIT 1
   `)
+  const stmtLatestUserOrCardMsg = db.prepare(`
+    SELECT * FROM messages
+    WHERE session_id = ? AND role IN ('user', 'card')
+    ORDER BY seq DESC, id DESC
+    LIMIT 1
+  `)
+  const stmtGetMeta = db.prepare('SELECT value, updated_at FROM memory_meta WHERE key = ?')
+  const stmtSetMeta = db.prepare(`
+    INSERT INTO memory_meta (key, value, updated_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(key) DO UPDATE SET
+      value = excluded.value,
+      updated_at = excluded.updated_at
+  `)
+  const stmtDeleteMeta = db.prepare('DELETE FROM memory_meta WHERE key = ?')
   const stmtListDates = db.prepare(`
     SELECT DISTINCT logical_date FROM messages
     WHERE scope = ?
@@ -205,6 +226,30 @@ export function createMemoryStore(dbPath) {
   function getLatestUserMessage(sessionId) {
     if (!sessionId) return undefined
     return stmtLatestUserMsg.get(sessionId)
+  }
+
+  function getLatestUserOrCardMessage(sessionId) {
+    if (!sessionId) return undefined
+    return stmtLatestUserOrCardMsg.get(sessionId)
+  }
+
+  function getMeta(key) {
+    const row = stmtGetMeta.get(String(key))
+    if (!row) return undefined
+    try {
+      return JSON.parse(row.value)
+    } catch {
+      return undefined
+    }
+  }
+
+  function setMeta(key, value, updatedAt = Date.now()) {
+    stmtSetMeta.run(String(key), JSON.stringify(value ?? null), updatedAt)
+    return value
+  }
+
+  function deleteMeta(key) {
+    return stmtDeleteMeta.run(String(key)).changes > 0
   }
 
   function listDatesWithMessages(scope = 'default') {
@@ -475,6 +520,10 @@ export function createMemoryStore(dbPath) {
     hasAnchorForDate,
     getMessagesForDate,
     getLatestUserMessage,
+    getLatestUserOrCardMessage,
+    getMeta,
+    setMeta,
+    deleteMeta,
     listDatesWithMessages,
     searchMessages,
     getSessionState,

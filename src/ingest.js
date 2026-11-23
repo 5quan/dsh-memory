@@ -1,4 +1,5 @@
 import { isAppendSurfaceEvent } from '@deepseek-ai/dsh-session'
+import { detectUserCorrection } from './correction.js'
 import { anchorOf, extractTextBlocks, logicalDateOf, parseCardReplyText, stripSystemReminders } from './util.js'
 
 const USER_ALLOWED_KINDS = new Set(['user', 'user-question-reply'])
@@ -40,9 +41,24 @@ function extractSemanticEntry(event) {
   return undefined
 }
 
-export function createIngestApi({ ctx, config, store, rolloverApi, clock = { now: () => Date.now() }, warn = () => {} }) {
+export function createIngestApi({ ctx, config, store, rolloverApi, bufferApi, clock = { now: () => Date.now() }, warn = () => {} }) {
   const excludedSessions = new Set(config.ingest.excludeSessionIds)
   const allowedScopes = new Set(config.ingest.includeScopes)
+  const pendingCaptures = new Set()
+
+  function trackCapture(promise) {
+    pendingCaptures.add(promise)
+    promise.finally(() => pendingCaptures.delete(promise))
+  }
+
+  async function flush() {
+    if (pendingCaptures.size > 0) {
+      await Promise.allSettled([...pendingCaptures])
+    }
+    if (bufferApi?.flush) {
+      await bufferApi.flush()
+    }
+  }
 
   function effectiveMode(sessionId) {
     const row = store.getSessionState(sessionId)
@@ -108,6 +124,34 @@ export function createIngestApi({ ctx, config, store, rolloverApi, clock = { now
       updatedAt: clock.now(),
     })
 
+    if (
+      res.inserted
+      && entry.role === 'user'
+      && config.correction?.autoCapture !== false
+      && bufferApi
+    ) {
+      const correction = detectUserCorrection(entry.text)
+      const rolloverDone = store.getRolloverState?.(logicalDate, scope)?.status === 'done'
+      if (correction && !rolloverDone && !bufferApi.hasAnchor(anchor, { scope, logicalDate })) {
+        const task = bufferApi.appendCreate({
+          logicalDate,
+          createdAt: new Date(timestamp).toISOString(),
+          scope,
+          sourceType: 'correction',
+          target: 'profile',
+          op: 'add',
+          section: config.correction?.defaultSection || '长期规矩与边界',
+          content: correction.content,
+          anchor,
+          pinned: false,
+          producer: 'auto-correction',
+        }).catch((error) => {
+          warn('dsh-memory: auto-correction buffer append failed: %s', error?.message ?? error)
+        })
+        trackCapture(task)
+      }
+    }
+
     return res.inserted
   }
 
@@ -169,5 +213,6 @@ export function createIngestApi({ ctx, config, store, rolloverApi, clock = { now
     handleSessionEvent,
     catchUpFromSessionQuery,
     effectiveMode,
+    flush,
   }
 }

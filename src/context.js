@@ -10,10 +10,41 @@ const HEADER_NOTE = '以下内容为你的持久化参考记忆数据（非新�
 const USAGE_GUIDANCE = [
   '记忆系统说明：你已接入按日期记忆插件 `dsh-memory`（今日对话原文正自动归档至本地库）。',
   '- 当用户明确说“记住…”或纠正你时，调用 `memory_buffer_add` 写入今日缓冲区（切勿自行编造来源；重要人/项目/服务器事实可用 `target: "entity:<名称>"`）。',
-  '- 需确认/筛选待入库条目时调 `memory_buffer_manage`（注意：`approve` 仅标记已确认、待日结落盘；如用户明确要求立刻写入画像需再调 `memory_digest_now`）；查历史原话或按日期浏览今日归档调 `memory_search`（可不填关键词按日期浏览），读日报调 `memory_journal_read`，浏览月度总览调 `memory_history_browse`，查看或维护实体档案调 `memory_entity_manage`。',
+  '- 初始建档/跳过冷启动引导调 `memory_onboarding`；读取晨报摘要或批量确认待入库条目调 `memory_briefing`（亦可用 `memory_buffer_manage` 并支持 `settleNow: true` 立即落盘）。',
+  '- 查历史原话或按日期浏览今日归档调 `memory_search`（可不填关键词按日期浏览），读日报调 `memory_journal_read`，浏览月度总览调 `memory_history_browse`，查看或维护实体档案调 `memory_entity_manage`。',
   '- 需手动日结调 `memory_digest_now`；用户要求删去某段记忆调 `memory_forget`；切换无痕模式调 `memory_mode_set`。',
   '- 边界纪律：访问记忆一律只使用上述 `memory_*` 工具，严禁使用 shell/文件工具（如 `pwsh`/`bash`/`glob`/`read`/`write`）翻查 `~/.dsh/daily-memory`、`~/.dsh/bot/memory` 或编写脚本直连 `archive.sqlite`；若本前缀与 `dsh-memory/delta` 动态增量已包含所需信息，直接回答即可，不必重复扫描磁盘。',
 ].join('\n')
+
+function resolveToolsService(ctx) {
+  if (typeof ctx?.get === 'function') {
+    try {
+      const svc = ctx.get('tools')
+      if (svc) return svc
+    } catch {}
+  }
+  try {
+    return ctx?.tools
+  } catch {
+    return undefined
+  }
+}
+
+export function detectSessionUiMode(ctx, agent) {
+  const getTool = (name) => {
+    try {
+      const toolsSvc = resolveToolsService(ctx)
+      if (typeof toolsSvc?.get !== 'function') return undefined
+      return toolsSvc.get(name, agent)
+    } catch {
+      return undefined
+    }
+  }
+  if (getTool('show_view')) return 'show_view'
+  if (getTool('ask_user')) return 'ask_user'
+  if (getTool('ask_user_question')) return 'ask_user_question'
+  return 'text'
+}
 
 function snapshotsDir(home) {
   return join(home, SNAPSHOTS_DIR)
@@ -63,7 +94,19 @@ function clipToTokens(text, maxTokens) {
   return kept.join('\n')
 }
 
-export function createContextApi({ ctx, config, store, profileApi, journalApi, bufferApi, entityApi, clock = { now: () => Date.now() }, warn = () => {} }) {
+export function createContextApi({
+  ctx,
+  config,
+  store,
+  profileApi,
+  journalApi,
+  bufferApi,
+  entityApi,
+  onboardingApi,
+  briefingApi,
+  clock = { now: () => Date.now() },
+  warn = () => {},
+}) {
   const memoryCache = new Map()
 
   function effectiveMode(sessionId) {
@@ -76,6 +119,11 @@ export function createContextApi({ ctx, config, store, profileApi, journalApi, b
       timeZone: config.timeZone,
       dayStartHour: config.dayStartHour,
     })
+  }
+
+  function hasSnapshot(sessionId, logicalDate = currentLogicalDate()) {
+    if (!sessionId) return false
+    return memoryCache.has(`${sessionId}::${logicalDate}`) || existsSync(snapshotPath(config.home, sessionId, logicalDate))
   }
 
   function pruneOldSnapshotsForSession(sessionId, keepDate) {
@@ -231,7 +279,7 @@ export function createContextApi({ ctx, config, store, profileApi, journalApi, b
     return ''
   }
 
-  function buildDeltaForSession(sessionId, scope, currentGen, latestUserText = '') {
+  function buildDeltaForSession(sessionId, scope, currentGen, latestUserText = '', options = {}) {
     let state = store.getSessionState(sessionId)
     const prevGen = state?.replaceGeneration ?? 0
 
@@ -273,18 +321,39 @@ export function createContextApi({ ctx, config, store, profileApi, journalApi, b
       }
     }
 
-    if (unseen.length === 0 && entityBlocks.length === 0) return undefined
+    let briefingNotice = ''
+    let onboardingNotice = ''
+    const allowInteractiveNotices = mode === 'full' && options.isSubagent !== true
+    if (allowInteractiveNotices) {
+      const uiMode = options.uiMode ?? detectSessionUiMode(ctx, options.agent)
+      if (briefingApi && briefingApi.shouldDeliverToday({ scope })) {
+        briefingNotice = briefingApi.buildBriefingNotice({ scope, uiMode })
+        if (briefingNotice) {
+          briefingApi.markDelivered({ scope, sessionId })
+        }
+      }
+      if (onboardingApi && onboardingApi.shouldPromptForSession(sessionId, scope)) {
+        onboardingNotice = onboardingApi.buildPromptNotice({ scope, uiMode })
+        if (onboardingNotice) {
+          onboardingApi.markSessionPrompted(sessionId, scope)
+        }
+      }
+    }
 
-    const nextSeenIds = [...seenIds, ...unseen.map(item => item.id)]
-    const nextInjectedEntities = [...alreadyInjected, ...newlyInjectedSlugs]
-    store.upsertSessionState(sessionId, {
-      scope,
-      memoryMode: mode,
-      replaceGeneration: Math.max(prevGen, currentGen),
-      bufferCursor: JSON.stringify({ seenIds: nextSeenIds }),
-      injectedEntities: nextInjectedEntities,
-      updatedAt: clock.now(),
-    })
+    if (unseen.length === 0 && entityBlocks.length === 0 && !briefingNotice && !onboardingNotice) return undefined
+
+    if (unseen.length > 0 || newlyInjectedSlugs.length > 0) {
+      const nextSeenIds = [...seenIds, ...unseen.map(item => item.id)]
+      const nextInjectedEntities = [...alreadyInjected, ...newlyInjectedSlugs]
+      store.upsertSessionState(sessionId, {
+        scope,
+        memoryMode: mode,
+        replaceGeneration: Math.max(prevGen, currentGen),
+        bufferCursor: JSON.stringify({ seenIds: nextSeenIds }),
+        injectedEntities: nextInjectedEntities,
+        updatedAt: clock.now(),
+      })
+    }
 
     const sections = []
     if (unseen.length > 0) {
@@ -306,10 +375,18 @@ export function createContextApi({ ctx, config, store, profileApi, journalApi, b
         ...entityBlocks,
       ].join('\n\n'))
     }
+    if (briefingNotice) {
+      sections.push(briefingNotice)
+    }
+    if (onboardingNotice) {
+      sections.push(onboardingNotice)
+    }
 
     const summaryParts = []
     if (unseen.length > 0) summaryParts.push(`新增 ${unseen.length} 条记忆增量`)
     if (entityBlocks.length > 0) summaryParts.push(`注入 ${entityBlocks.length} 个实体档案`)
+    if (briefingNotice) summaryParts.push('推送今日晨报与待确认记忆')
+    if (onboardingNotice) summaryParts.push('触发初始画像冷启动引导')
 
     return createUserMessage({
       content: [{ type: 'text', text: sections.join('\n\n') }],
@@ -342,7 +419,11 @@ export function createContextApi({ ctx, config, store, profileApi, journalApi, b
 
       const currentGen = Number(agent?.session?.surface?.replaceGeneration ?? 0)
       const latestUserText = latestUserPromptText(decision.messages)
-      const deltaMsg = buildDeltaForSession(sessionId, scope, currentGen, latestUserText)
+      const isSubagent = agent?.session?.header?.origin === 'subagent'
+      const deltaMsg = buildDeltaForSession(sessionId, scope, currentGen, latestUserText, {
+        agent,
+        isSubagent,
+      })
       if (!deltaMsg) return decision
 
       return {
@@ -355,6 +436,7 @@ export function createContextApi({ ctx, config, store, profileApi, journalApi, b
   return {
     install,
     sectionFor,
+    hasSnapshot,
     invalidateSnapshots,
     buildDeltaForSession,
   }

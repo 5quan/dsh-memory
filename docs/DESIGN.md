@@ -1,6 +1,6 @@
 # `dsh-memory` 架构设计说明书
 
-> 状态：M1 已落地，M2（OpenViking 历史总览与实体档案）已完成（`#1`）  
+> 状态：M1、M2（`#1`）、M3（`#2`：冷启动引导、每日晨报确认、轻量纠偏与公开 Cordis 服务契约）已完成  
 > 仓库：`5quan/dsh-memory`  
 > 参考来源：DeepSeek Super-agent 设计探索（`https://zhuanlan.zhihu.com/p/2099987320443237060`）、`dsh-ctrl` 记忆体系前期探索、OpenViking L0/L1/L2 渐进披露范式、AutoDream 后台整理思想
 
@@ -60,7 +60,7 @@ flowchart TB
 ## 2. 目录结构与存储模型
 
 > **存储分级原则**：
-> - **主存储（须纳入备份，严禁随意删除）**：`PROFILE.md`、`buffer/`、`journals/`、`entities/`（M2/M3）、`retired.jsonl`，以及 `archive.sqlite` 中的 `messages`、`session_state`、`rollover_state` 表。一旦 DSH 会话日志被清理，`archive.sqlite` 就是原始对话的唯一备份。
+> - **主存储（须纳入备份，严禁随意删除）**：`PROFILE.md`、`buffer/`、`journals/`、`entities/`（M2/M3）、`retired.jsonl`，以及 `archive.sqlite` 中的 `messages`、`session_state`、`rollover_state`、`memory_meta` 表。一旦 DSH 会话日志被清理，`archive.sqlite` 就是原始对话的唯一备份。
 > - **可删可重建派生层**：`archive.sqlite` 中的 `messages_fts` 虚表、`snapshots/` 前缀缓存、`history/`（M2 历史索引）。
 
 ### 2.1 磁盘目录布局
@@ -169,6 +169,15 @@ CREATE TABLE IF NOT EXISTS rollover_state (
   completed_at INTEGER,
   PRIMARY KEY (logical_date, scope)
 );
+
+-- 5. 插件级持久化元状态（冷启动状态 onboarding:<scope>、晨报投递水位 briefing:<scope>）
+CREATE TABLE IF NOT EXISTS memory_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+PRAGMA user_version = 2;
 ```
 
 > 注：若 `messages_fts` 损坏或升级分词器，可通过 `INSERT INTO messages_fts(messages_fts) VALUES('rebuild')` 无损重建；若存在 `ctx.sessionQuery` 且 DSH 会话未清理，启动时可按 `last_seq` 补齐停机期间漏收的实时事件。
@@ -373,25 +382,27 @@ stateDiagram-v2
 
 ### 3.6 初始画像冷启动引导、每日确认体验与对外服务契约（M3）
 
-#### 1. 初始画像冷启动引导（空画像首次加载）
+#### 1. 初始画像冷启动引导（`src/onboarding.js` + `memory_onboarding`）
 解决插件首次安装/启用后 `PROFILE.md` 为空、用户不知如何“喂初始记忆”的冷启动体验问题：
-- **触发条件**：插件加载后首次进入正常模式（`memoryMode !== 'off'`）会话，检测到 `PROFILE.md` 不存在或有效条目为空，且尚未标记“已完成/已跳过初始引导”。
-- **两种候选采集形态（可按宿主能力择一或组合）**：
-  1. **首轮简短问卷**：首次会话由助手发出一段结构化引导消息（或通过 DSH `ask_user` 逐步问答），聚焦核心画像的 3–4 个关键维度（称呼与身份/常用环境、沟通与输出偏好、长期规矩与红线、高频关键人/项目）；
-  2. **交互式表单/弹窗**：基于 DSH `show_view`（或宿主前端初始化弹窗）展示可一键填写/勾选的初始画像卡片，支持“跳过/稍后填写”，绝不阻塞正常对话。
-- **落盘与缓存原则**：
-  - 用户提交结果统一按 `PROFILE.md` 的分节与 `2000` token 准入预算校验（高确定性红线支持勾选 `pinned`）；
-  - 若在首轮会话建立前弹窗提交，可直接写入初始 `PROFILE.md` 作为首日冻结前缀；若在会话中通过问卷回复，先入当日 `buffer/`（标注 `source_type: 'explicit'`）保住首轮 Prefix Cache，并在用户确认或日结时落盘；
-  - 一旦完成提交或用户主动跳过，即在持久化状态中记录冷启动已完成，后续不再重复弹窗打扰，仍允许用户随时手动触发重填。
+- **触发条件**：正常模式（`mode === 'full'` 且非 `subagent` 子会话）进入对话时，检测到 `PROFILE.md` 有效条目为空且 `memory_meta` 中 `onboarding:<scope>` 仍为 `'pending'`，且当前 `sessionId` 尚未被提示过；
+- **宿主 UI 自适应探测**：在 `agent/pre-step` 中通过 DSH 公开 API `ctx.tools.get(name, agent)` 探测当前会话可用交互能力，按优先级选择 `show_view` > `ask_user` > `ask_user_question` > 纯文本结构化问卷，把引导合并入同轮 `dsh-memory/delta` 动态增量（每会话最多提示一次、Compaction 不重弹，绝不阻塞当前对话）；在原版 DSH 中调用 `memory_onboarding(action='prompt')` 可直接触发 `ctx.userQuestions.ask(...)` 弹窗采集；
+- **4 个核心维度与预算/缓存保护**：覆盖 `基本身份与环境`、`沟通与工作偏好`、`长期规矩与边界`（默认 `pinned: true`）、`高频关键人/项目`（支持附带生成 `entities/` 实体卡）；
+  - 提交前对累计 `PROFILE.md` 执行 dry-run token 预算校验（超限返回 `PROFILE_BUDGET_EXCEEDED` 并拒绝写入）；
+  - 会前无快照时默认 `writeMode: 'direct'` 直接落盘 `PROFILE.md` 作为首日冻结前缀；会中已有快照时默认 `writeMode: 'buffer'`（或自动将 `direct` 降级为 `buffer` 除非传 `forceDirect: true`），保住首轮 Prefix Cache；
+  - 提交或调用 `skip` 后持久化记录至 `memory_meta`，不再打扰；可随时通过 `memory_onboarding(action='reset' | 'prompt')` 重填。
 
-#### 2. 每日晨报确认体验
-- 每日首次交互汇总昨日日报亮点与 `buffer/` 待确认条目（如自动抽取/纠偏提案），借助 DSH `show_view` / `ask_user` 提供低摩擦一键勾选确认（`approve`）或驳回（`reject`）。
+#### 2. 每日晨报汇总与低摩擦确认体验（`src/briefing.js` + `memory_briefing`）
+- 聚合最近一份已日结日报的 6 段核心亮点与 `buffer/` 中全部 `pending` / `approved` 条目；每日首次正常交互通过 `dsh-memory/delta` 一次性推送并记录 `briefing:<scope>`（`lastBriefedDate`）；
+- `memory_briefing`（`get` / `confirm` / `dismiss`）与 `memory_buffer_manage` 支持批量 `approve` / `reject` 及可选 `settleNow: true` 立即结算（跨日期直跑 `buffer.settleDates` 写入 `PROFILE.md` / `entities/` 并刷新快照）；原版 DSH 中 `interactive: true` 可通过 `ctx.userQuestions.ask(...)` 多选勾选。
 
-#### 3. 公开 Cordis 服务与事件契约（单向解耦，供上层 Bot 绑定）
-- 为支撑 `dsh-memory` 独立发布、`dsh-ctrl`（Bot 侧）主动绑定融合的架构形态，M3 在 Cordis 注册命名公开服务（实现前核对避免与现有 DSH 服务名冲突）并稳定事件格式：
-  1. **生命周期事件**：`dsh-memory/day-rolled-over`（`{ date, scope, journalPath, summary }`），供上层 Bot 在空闲时自行触发换新 Part；
-  2. **查询/投递接口**：获取晨报摘要数据（昨日日报亮点 + `buffer/` 待确认条目）、按文本/别名查询匹配实体卡（供外部 Worker 装配上下文）、向当日缓冲区安全投递候选/复盘记忆（保持统一审核准入，不直写 `PROFILE.md`）。
-- 具体调用 `ds-bot` 换段（`newPart`）与合并 Ticket 晨报的薄胶水代码由 `dsh-ctrl` 侧维护，绝不反向引入 `dsh-memory`。
+#### 3. 轻量自动纠偏捕获（`src/correction.js` + `ingest.js`）
+- 在 `session/event` 采集到新增真实用户发言（`role === 'user'`、`mode === 'full'`）时，运行零 LLM 开销的高精度规则检测 `detectUserCorrection`（命中显式纠偏/长期指令，过滤代码块与纯疑问句，且按 `anchor` 去重），自动写入当日 `buffer/` 为 `source_type: 'correction'`、`status: 'pending'` 并强制绑定真实用户 `anchor`，**绝不盘中直写 `PROFILE.md`**；
+- `memory_buffer_add` 与 `buffer.js` 结算闸门对 `explicit` 和 `correction` 双双强制核验真实用户/卡片 `anchor`，未核验通过一律降级为 `extracted`。
+
+#### 4. 公开 Cordis 服务与事件契约（`src/service.js`，零 `ds-bot` 依赖）
+- **标准生命周期事件**：`DAY_ROLLED_OVER_EVENT = 'dsh-memory/day-rolled-over'`，载荷 `{ date, scope, journalPath, summary: { title, highlights, pendingBufferCount, text } }`；
+- **命名公开 Cordis 服务**：`SERVICE_NAME = 'dshMemory'`（通过 `ctx.provide('dshMemory', service)` 注册，已核对不与 `@deepseek-ai/*` 现有服务冲突），提供：`contractVersion: 1`、`getCurrentLogicalDate`、`getMorningBriefing`、`markBriefingDelivered`、`confirmBufferItems`、`matchEntities(text, { maxTokens })`、`getEntity`、`listEntities`、`submitBufferCandidate`（统一走缓冲区 `pending` 准入，验真锚点防冒用，绝不直写 `PROFILE.md`）、`getOnboardingState`、`submitOnboarding`、`skipOnboarding`、`resetOnboarding`。
+- 具体调用 `ds-bot` 换段（`newPart`）与合并 Ticket 晨报的薄胶水代码由 `dsh-ctrl` 侧消费上述契约维护，绝不反向引入 `dsh-memory`。
 
 ---
 
@@ -425,7 +436,10 @@ stateDiagram-v2
 | `session.surface.replaceGeneration` | `readonly number`（随替换/Compaction 单调递增） | 在 `agent/pre-step` 中比对是否发生 Compaction，触发游标重置 |
 | `ctx.systemPrompt.section(...)` | `{ name, order, interpolate: false, text: (context: AssembleContext) => string }` | 按 `(context.agent?.id, logicalDate)` 读取/生成冻结前缀快照 |
 | `ctx.on('agent/pre-step', ...)` | `async ({ agent, messages, turn, step, signal, modelSelection }, next) => PreStepDecision` | 调用 `await next()` 后在 `decision.kind === 'enter'` 时持久化前置动态增量消息 |
-| `ctx.tools.register(defineTool(...))` | 来自 `@deepseek-ai/dsh-tools` | 注册面向模型的 7 个 M1 工具及后续扩展工具 |
+| `ctx.tools.register(defineTool(...))` | 来自 `@deepseek-ai/dsh-tools` | 注册面向模型的 11 个 M1–M3 记忆工具 |
+| `ctx.tools.get(name, scope?)` | `@deepseek-ai/dsh-tools` 返回当前作用域可见工具定义 | 在 `agent/pre-step` 中零耦合探测宿主交互能力（`show_view` / `ask_user` / `ask_user_question`） |
+| `ctx.userQuestions?.ask(...)` | `@deepseek-ai/dsh-user-questions` 可选交互服务 | 原版 DSH 中驱动冷启动问卷与晨报多选确认弹窗（无此服务时优雅降级） |
+| `ctx.provide('dshMemory', service)` | `@deepseek-ai/cordis` 服务注册（`apply` 不返回非 Effect 对象） | 向外部插件/上层 Bot 暴露只读查询与缓冲中转服务契约 |
 | 模型解析顺序（日结 / Dream） | `config.llm` → `ctx.agentDefaultModel?.currentSelection()` → 最近活跃 `agent.model.current()` | 兼容无 `ds-bot` 的原版 DSH 与指定轻量模型配置 |
 
 **插件入口与可测试时钟注入约定**：
@@ -471,6 +485,10 @@ export function apply(ctx, config = {}) {
 | `sections.entities.maxTokens` | `number` | `1500` | **[M2/M3 预留]** 单轮实体增量注入 token 上限 |
 | `buffer.autoCommitSources` | `string[]` | `['explicit']` | 日终允许自动落盘进 `PROFILE.md` 的缓冲区来源类型（须通过 `anchor` 校验） |
 | `buffer.requireConfirmOnOverwrite` | `boolean` | `true` | 覆盖/删除现有画像或 `pinned` 条目是否强制人工确认 |
+| `onboarding.enabled` | `boolean` | `true` | 是否在空画像首次进入正常会话时自动触发冷启动引导 |
+| `briefing.enabled` | `boolean` | `true` | 是否在每日首次正常交互时推送晨报汇总与待确认记忆 |
+| `correction.autoCapture` | `boolean` | `true` | 是否启用轻量规则自动捕获用户纠偏写入当日缓冲区 |
+| `correction.defaultSection` | `string` | `'长期规矩与边界'` | 自动捕获纠偏条目的默认 `PROFILE.md` 归属分节 |
 | `llm.provider` | `string \| undefined` | `undefined` | 日结/Dream 模型提供方覆盖 |
 | `llm.model` | `string \| undefined` | `undefined` | 日结/Dream 模型 ID 覆盖（可指定轻量模型） |
 
@@ -483,12 +501,14 @@ export function apply(ctx, config = {}) {
 | **M1** | `memory_search` | 在 `archive.sqlite`（FTS5 `trigram` + 短词 `LIKE`，多词支持 `AND` 优先与 `OR` 降级排序）与 `journals/*.md` 中检索原文与历史记录，省略 `query` 时按日期浏览近期归档，返回带 `chat://YYYY-MM-DD#<session>#<seq>` 锚点的片段 | `query?`, `dateFrom?`, `dateTo?`, `scope?`, `limit?` |
 | **M1** | `memory_journal_read` | 按日期读取某天完整日报，或列出已有日报日期列表 | `date?`（缺省则返回可用日期列表） |
 | **M1** | `memory_buffer_add` | 将记忆要点追加到当日缓冲区；插件自动从当前会话绑定真实用户 `anchor`，绝不直接改 `PROFILE.md` | `content`, `sourceType`, `target?`, `section?`, `pinned?` |
-| **M1** | `memory_buffer_manage` | 查看、筛选、通过（`approve`）或剔除（`reject`）当前缓冲区内的待处理记忆条目，支持用户选择记忆 | `action` (`list` \| `approve` \| `reject`), `ids?` |
+| **M1** | `memory_buffer_manage` | 查看、筛选、通过（`approve`）或剔除（`reject`）当前缓冲区内的待处理记忆条目，支持可选 `settleNow: true` 立即结算 | `action` (`list` \| `approve` \| `reject`), `ids?`, `settleNow?` |
 | **M1** | `memory_mode_set` | 切换当前会话或全局默认的无痕模式（`full` / `read-only` / `off`） | `mode`, `scope?` (`session` \| `global`) |
 | **M1** | `memory_digest_now` | 手动触发指定逻辑日（默认昨天，支持今天预览或显式重建）的日结生成 | `date?`, `force?` |
 | **M1** | `memory_forget` | 按用户要求主动遗忘：物理删除匹配原文与 FTS 索引、作废相关缓冲条目、给对应日报条目打 `[已按用户要求遗忘]` 标记并失效快照 | `anchor?`, `date?`, `keyword?`, `sessionId?` |
 | **M2** | `memory_history_browse` | 浏览 `history/` 的 L0 `.abstract.md` / L1 `.overview.md`、重建单跳索引并引导下钻 L2 日报 | `action` (`list` \| `read` \| `rebuild`), `month?`, `level?` |
 | **M2** | `memory_entity_manage` | 列出、读取、增改或删除 `entities/` 实体档案卡及其 `aliases` 触发词 | `action` (`list` \| `read` \| `upsert` \| `delete`), `name?`, `type?`, `aliases?`, `content?`, `op?`, `supersedesId?`, `pinned?`, `force?` |
+| **M3** | `memory_onboarding` | 查询冷启动状态、触发交互问卷（`prompt`）、提交初始画像（`submit`）、跳过（`skip`）或重填（`reset`） | `action` (`status` \| `prompt` \| `submit` \| `skip` \| `reset`), `identity?`, `preferences?`, `rules?`, `entities?`, `entries?`, `writeMode?`, `forceDirect?` |
+| **M3** | `memory_briefing` | 读取每日晨报摘要（昨日亮点 + 待确认缓冲）、批量或交互确认（`confirm` / `settleNow`）或忽略当日晨报（`dismiss`） | `action` (`get` \| `confirm` \| `dismiss`), `date?`, `approveIds?`, `rejectIds?`, `settleNow?`, `interactive?` |
 | **M4** | `memory_dream_now` | 手动触发一次后台整理提案（生成合并/冲突/过期建议到缓冲区） | `dryRun?` |
 | **M4** | `memory_rollback` | 回滚某次 `PROFILE.md` 变更（从 `retired.jsonl` 恢复） | `entryId` |
 

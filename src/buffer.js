@@ -72,6 +72,7 @@ export function createBufferApi({ home, clock = { now: () => Date.now() } }) {
           supersedes_id: evt.supersedes_id ?? null,
           anchor: evt.anchor ?? null,
           pinned: evt.pinned === true,
+          ...(typeof evt.producer === 'string' && evt.producer !== '' ? { producer: evt.producer } : {}),
           status: evt.status ?? 'pending',
           history: [evt],
         })
@@ -140,10 +141,25 @@ export function createBufferApi({ home, clock = { now: () => Date.now() } }) {
         supersedes_id: input.supersedesId ?? input.supersedes_id ?? null,
         anchor: input.anchor ?? null,
         pinned: input.pinned === true,
+        ...(typeof input.producer === 'string' && input.producer.trim() !== '' ? { producer: input.producer.trim() } : {}),
       }
       await appendRawEvent(logicalDate, event)
       return { ...event, status: 'pending' }
     })
+  }
+
+  function hasAnchor(anchor, { scope, logicalDate } = {}) {
+    if (!anchor) return false
+    const items = [...loadFoldedMap(logicalDate).values()]
+    return items.some((item) => {
+      if (scope && item.scope !== scope) return false
+      if (item.status === 'rejected') return false
+      return item.anchor === anchor
+    })
+  }
+
+  function flush() {
+    return writeChain
   }
 
   function appendStatus({ id, logicalDate, status, at, by = 'system', reason, sourceType }) {
@@ -222,10 +238,13 @@ export function createBufferApi({ home, clock = { now: () => Date.now() } }) {
 
       for (const item of items) {
         let effectiveSource = item.source_type
-        if (item.status === 'pending' && effectiveSource === 'explicit') {
+        if (item.status === 'pending' && (effectiveSource === 'explicit' || effectiveSource === 'correction')) {
           const msg = item.anchor ? store.getMessageByAnchor(item.anchor) : undefined
-          if (!msg || msg.role !== 'user') {
+          const isValidHumanAnchor = Boolean(msg && (msg.role === 'user' || msg.role === 'card'))
+          if (!isValidHumanAnchor) {
+            const originalSource = effectiveSource
             effectiveSource = 'extracted'
+            const reasonCode = originalSource === 'correction' ? 'CORRECTION_ANCHOR_INVALID' : 'EXPLICIT_ANCHOR_INVALID'
             await appendRawEvent(logicalDate, {
               event: 'status',
               id: item.id,
@@ -233,9 +252,9 @@ export function createBufferApi({ home, clock = { now: () => Date.now() } }) {
               source_type: 'extracted',
               at,
               by: 'system',
-              reason: 'explicit anchor verification failed; downgraded to extracted',
+              reason: `${originalSource} anchor verification failed; downgraded to extracted`,
             })
-            warnings.push({ id: item.id, reason: 'EXPLICIT_ANCHOR_INVALID' })
+            warnings.push({ id: item.id, reason: reasonCode })
             deferred.push(item.id)
             continue
           }
@@ -365,14 +384,45 @@ export function createBufferApi({ home, clock = { now: () => Date.now() } }) {
     })
   }
 
+  async function settleDates({ dates = [], scope = 'default', store, profileApi, entityApi, config }) {
+    const uniqueDates = [...new Set(dates.filter(Boolean))].sort()
+    const profile = { committed: [], deferred: [], warnings: [] }
+    const entity = { committed: [], deferred: [], warnings: [] }
+
+    for (const logicalDate of uniqueDates) {
+      if (profileApi) {
+        const pRes = await settleProfileForDate({ logicalDate, scope, store, profileApi, config })
+        profile.committed.push(...pRes.committed)
+        profile.deferred.push(...pRes.deferred)
+        profile.warnings.push(...pRes.warnings)
+      }
+      if (entityApi) {
+        const eRes = await settleEntitiesForDate({ logicalDate, scope, store, entityApi, config })
+        entity.committed.push(...eRes.committed)
+        entity.deferred.push(...eRes.deferred)
+        entity.warnings.push(...eRes.warnings)
+      }
+    }
+
+    return {
+      dates: uniqueDates,
+      profile,
+      entity,
+      committedCount: profile.committed.length + entity.committed.length,
+    }
+  }
+
   return {
     listItems,
+    hasAnchor,
+    flush,
     appendCreate,
     appendStatus,
     updateStatuses,
     rejectByAnchors,
     settleProfileForDate,
     settleEntitiesForDate,
+    settleDates,
     closeNotesForDate,
   }
 }

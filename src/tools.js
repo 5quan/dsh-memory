@@ -7,7 +7,21 @@ const stringOutput = {
   render: (_args, value) => [{ type: 'text', text: String(value) }],
 }
 
-export function createToolsApi({ ctx, config, store, bufferApi, journalApi, digestApi, contextApi, historyApi, entityApi, clock = { now: () => Date.now() } }) {
+export function createToolsApi({
+  ctx,
+  config,
+  store,
+  bufferApi,
+  journalApi,
+  digestApi,
+  contextApi,
+  historyApi,
+  entityApi,
+  onboardingApi,
+  briefingApi,
+  profileApi,
+  clock = { now: () => Date.now() },
+}) {
   function currentLogicalDate() {
     return logicalDateOf(clock.now(), {
       timeZone: config.timeZone,
@@ -137,12 +151,14 @@ export function createToolsApi({ ctx, config, store, bufferApi, journalApi, dige
         }
 
         const scope = sessionScopeOf(sessionId)
-        const latestUser = sessionId ? store.getLatestUserMessage(sessionId) : undefined
+        const latestUser = sessionId
+          ? (store.getLatestUserOrCardMessage?.(sessionId) ?? store.getLatestUserMessage(sessionId))
+          : undefined
         const boundAnchor = latestUser?.anchor ?? null
 
         let effectiveSourceType = args.sourceType
         let downgradeNote = ''
-        if (effectiveSourceType === 'explicit' && !boundAnchor) {
+        if ((effectiveSourceType === 'explicit' || effectiveSourceType === 'correction') && !boundAnchor) {
           effectiveSourceType = 'extracted'
           downgradeNote = ' (downgraded to "extracted" because no verified user message anchor exists in this session)'
         }
@@ -167,12 +183,13 @@ export function createToolsApi({ ctx, config, store, bufferApi, journalApi, dige
 
     defineTool({
       name: 'memory_buffer_manage',
-      description: 'List, approve, or reject pending items in the daily memory buffer so the user can review and choose what gets committed. Note: "approve" marks items ready for settlement at daily rollover (preserving today\'s frozen prefix cache); it does NOT immediately rewrite PROFILE.md unless memory_digest_now is run.',
+      description: 'List, approve, or reject pending items in the daily memory buffer so the user can review and choose what gets committed. Note: "approve" marks items ready for settlement at daily rollover (preserving today\'s frozen prefix cache) unless settleNow is true.',
       parameters: {
         action: { type: 'string', enum: ['list', 'approve', 'reject'], required: true, description: 'Action to run on buffer items.' },
         ids: { type: 'array', items: { type: 'string' }, description: 'Buffer item IDs for approve/reject.' },
         date: { type: 'string', description: 'Optional logical date filter (YYYY-MM-DD) for list.' },
         reason: { type: 'string', description: 'Optional reason recorded on status change.' },
+        settleNow: { type: 'boolean', description: 'When action is "approve", if true, immediately settle approved profile/entity buffer items to disk and refresh snapshots.' },
       },
       output: stringOutput,
       async execute(args, exec) {
@@ -196,13 +213,44 @@ export function createToolsApi({ ctx, config, store, bufferApi, journalApi, dige
         if (ids.length === 0) {
           return `Please provide at least one item id in "ids" to ${args.action}.`
         }
+
+        if (args.action === 'approve' && args.settleNow === true && briefingApi) {
+          const res = await briefingApi.confirmItems({
+            approveIds: ids,
+            reason: args.reason,
+            settleNow: true,
+            scope,
+          })
+          if (res.approved.length === 0) {
+            return 'No matching buffer items found.'
+          }
+          const committed = res.settlement?.committedCount ?? 0
+          const warnings = [
+            ...(res.settlement?.profile?.warnings ?? []),
+            ...(res.settlement?.entity?.warnings ?? []),
+          ]
+          return [
+            `Updated ${res.approved.length} buffer item(s) to "approved": ${res.approved.join(', ')}.`,
+            `Immediate settlement committed ${committed} item(s).`,
+            ...(warnings.length > 0 ? [`Warnings: ${warnings.map(w => `${w.id}:${w.reason}`).join(', ')}`] : []),
+          ].join(' ')
+        }
+
         const nextStatus = args.action === 'approve' ? 'approved' : 'rejected'
+        const existingItems = args.settleNow === true ? bufferApi.listItems({ scope, statuses: ['pending', 'approved'] }) : []
         const updated = await bufferApi.updateStatuses(ids, nextStatus, {
           by: 'user',
           reason: args.reason,
         })
         if (updated.length === 0) {
           return 'No matching buffer items found.'
+        }
+        if (nextStatus === 'approved' && args.settleNow === true && profileApi) {
+          const updatedSet = new Set(updated)
+          const dates = existingItems.filter(i => updatedSet.has(i.id)).map(i => i.logical_date)
+          const settlement = await bufferApi.settleDates({ dates, scope, store, profileApi, entityApi, config })
+          if (settlement.profile.committed.length > 0) contextApi?.invalidateSnapshots?.()
+          return `Updated ${updated.length} buffer item(s) to "approved": ${updated.join(', ')}. Immediate settlement committed ${settlement.committedCount} item(s).`
         }
         if (nextStatus === 'approved') {
           return `Updated ${updated.length} buffer item(s) to "approved": ${updated.join(', ')}. They will be settled into PROFILE.md/entities during daily rollover (or run memory_digest_now with today's date if immediate settlement is explicitly requested).`
@@ -490,6 +538,205 @@ export function createToolsApi({ ctx, config, store, bufferApi, journalApi, dige
           return `Failed to upsert entity "${name}": ${res.reason}.`
         }
         return `Updated entity "${res.entity.name}" (${res.slug})${res.factId ? `, fact=${res.factId}` : ''}.`
+      },
+    }),
+
+    defineTool({
+      name: 'memory_onboarding',
+      description: 'Inspect status, run interactive questionnaire, submit initial profile answers, skip, or reset cold-start profile onboarding.',
+      parameters: {
+        action: { type: 'string', enum: ['status', 'prompt', 'submit', 'skip', 'reset'], required: true, description: 'Onboarding operation to perform.' },
+        identity: { type: 'string', description: 'User name/role and environment facts (for submit).' },
+        preferences: { type: 'string', description: 'Communication and output style preferences (for submit).' },
+        rules: { type: 'string', description: 'Long-term rules and hard boundaries (pinned by default on submit).' },
+        entities: {
+          type: 'array',
+          description: 'Optional key people, projects, or servers to create entity cards for.',
+          items: {
+            type: 'object',
+            additionalProperties: true,
+            properties: {
+              name: { type: 'string', description: 'Entity name.' },
+              type: { type: 'string', description: 'Entity type (person, project, server, etc.).' },
+              aliases: { type: 'array', items: { type: 'string' }, description: 'Trigger aliases.' },
+              content: { type: 'string', description: 'Initial entity fact.' },
+              pinned: { type: 'boolean', description: 'Pin initial fact.' },
+            },
+          },
+        },
+        entries: {
+          type: 'array',
+          description: 'Optional structured profile entries with explicit section/pinned flags.',
+          items: {
+            type: 'object',
+            additionalProperties: true,
+            properties: {
+              section: { type: 'string', description: 'Target PROFILE.md section.' },
+              content: { type: 'string', required: true, description: 'Profile entry text.' },
+              pinned: { type: 'boolean', description: 'Pin this entry.' },
+            },
+          },
+        },
+        writeMode: { type: 'string', enum: ['direct', 'buffer'], description: 'Write directly to PROFILE.md (pre-session) or to daily buffer (default in-session to protect Prefix Cache).' },
+        forceDirect: { type: 'boolean', description: 'If true, allow direct PROFILE.md write even if today already has a session snapshot.' },
+        reason: { type: 'string', description: 'Optional reason for submit/skip.' },
+      },
+      output: stringOutput,
+      isConcurrencySafe: args => args?.action === 'status',
+      async execute(args, exec) {
+        const sessionId = exec.agent?.id
+        const mode = effectiveModeOf(sessionId)
+        if (mode === 'off') {
+          return 'Memory is disabled (mode=off) for this session.'
+        }
+        if (!onboardingApi) {
+          return 'Onboarding module is not available.'
+        }
+        const scope = sessionScopeOf(sessionId)
+
+        if (args.action === 'status') {
+          const state = onboardingApi.getState({ scope })
+          return [
+            `Onboarding status: ${state.status} (needsOnboarding=${state.needsOnboarding}, enabled=${state.enabled})`,
+            `PROFILE.md entries: ${state.profileEntryCount}, estimated tokens: ${state.profileTokens}/${state.maxProfileTokens}`,
+          ].join('\n')
+        }
+
+        if (mode !== 'full') {
+          return `Cannot modify onboarding state while session mode is "${mode}".`
+        }
+
+        if (args.action === 'skip') {
+          const res = onboardingApi.skip({ scope, reason: args.reason })
+          return `Onboarding skipped for scope "${res.scope}". It will not prompt automatically again unless reset.`
+        }
+
+        if (args.action === 'reset') {
+          const res = onboardingApi.reset({ scope })
+          return `Onboarding reset to "${res.status}" for scope "${res.scope}".`
+        }
+
+        if (args.action === 'prompt') {
+          const res = await onboardingApi.promptInteractive({
+            agent: exec.agent,
+            signal: exec.signal,
+            scope,
+            writeMode: args.writeMode,
+          })
+          if (!res.ok && res.reason === 'USER_QUESTIONS_UNAVAILABLE') {
+            return [
+              'Interactive userQuestions card is unavailable in this host. Ask the user concisely using your chat UI or text across these dimensions, then call memory_onboarding(action="submit") or memory_onboarding(action="skip"):',
+              ...res.dimensions.map((d, idx) => `${idx + 1}. ${d.title} (${d.section}): ${d.question}`),
+            ].join('\n')
+          }
+          if (res.skipped) {
+            return 'User skipped interactive onboarding. Marked onboarding as skipped.'
+          }
+          if (!res.ok) {
+            return `Onboarding prompt failed: ${res.reason}.`
+          }
+          return `Interactive onboarding saved (writeMode=${res.writeMode}, estimatedTokens=${res.estimatedProfileTokens}/${res.maxProfileTokens}).`
+        }
+
+        const res = await onboardingApi.submit({
+          identity: args.identity,
+          preferences: args.preferences,
+          rules: args.rules,
+          entities: args.entities,
+          entries: args.entries,
+          writeMode: args.writeMode,
+          forceDirect: args.forceDirect === true,
+          reason: args.reason,
+          sessionId,
+          scope,
+        })
+        if (!res.ok) {
+          if (res.reason === 'PROFILE_BUDGET_EXCEEDED') {
+            return `Onboarding rejected: PROFILE.md would reach ${res.estimatedTokens} tokens (max ${res.maxProfileTokens}). Please shorten entries and retry.`
+          }
+          return `Onboarding submit failed: ${res.reason}.`
+        }
+        const savedInfo = res.writeMode === 'direct'
+          ? `committed ${res.committedProfileIds.length} profile entry(s) and ${res.committedEntitySlugs.length} entity card(s) directly`
+          : `queued ${res.bufferedIds.length} explicit item(s) into today's buffer (preserving Prefix Cache)`
+        return `Onboarding completed (${savedInfo}${res.downgradedForCache ? '; downgraded direct->buffer to preserve today snapshot' : ''}; estimated PROFILE tokens=${res.estimatedProfileTokens}/${res.maxProfileTokens}).`
+      },
+    }),
+
+    defineTool({
+      name: 'memory_briefing',
+      description: 'Fetch daily morning briefing summary (yesterday journal highlights + pending buffer items), interactively or batch confirm/reject items, or dismiss today briefing.',
+      parameters: {
+        action: { type: 'string', enum: ['get', 'confirm', 'dismiss'], required: true, description: 'Briefing action.' },
+        date: { type: 'string', description: 'Optional logical date (YYYY-MM-DD).' },
+        approveIds: { type: 'array', items: { type: 'string' }, description: 'Buffer item IDs to approve.' },
+        rejectIds: { type: 'array', items: { type: 'string' }, description: 'Buffer item IDs to reject.' },
+        settleNow: { type: 'boolean', description: 'If true on confirm, immediately settle approved items into PROFILE.md/entities and refresh snapshots.' },
+        interactive: { type: 'boolean', description: 'If true on confirm without explicit IDs, invoke host userQuestions multi-select card when available.' },
+        reason: { type: 'string', description: 'Optional confirmation reason.' },
+      },
+      output: stringOutput,
+      isConcurrencySafe: args => args?.action === 'get',
+      async execute(args, exec) {
+        const sessionId = exec.agent?.id
+        const mode = effectiveModeOf(sessionId)
+        if (mode === 'off') {
+          return 'Memory is disabled (mode=off) for this session.'
+        }
+        if (!briefingApi) {
+          return 'Briefing module is not available.'
+        }
+        const scope = sessionScopeOf(sessionId)
+
+        if (args.action === 'get') {
+          const briefing = briefingApi.getMorningBriefing({ date: args.date?.trim() || undefined, scope })
+          return `${briefing.markdown}\n\n[alreadyDelivered=${briefing.alreadyDelivered}, pending=${briefing.buffer.totalPending}, approved=${briefing.buffer.totalApproved}]`
+        }
+
+        if (mode !== 'full') {
+          return `Cannot modify briefing/buffer state while session mode is "${mode}".`
+        }
+
+        if (args.action === 'dismiss') {
+          const res = briefingApi.markDelivered({ date: args.date?.trim() || undefined, scope, sessionId })
+          return `Marked morning briefing delivered for ${res.date} (scope=${res.scope}).`
+        }
+
+        const hasExplicitIds = (Array.isArray(args.approveIds) && args.approveIds.length > 0)
+          || (Array.isArray(args.rejectIds) && args.rejectIds.length > 0)
+
+        if (args.interactive === true && !hasExplicitIds) {
+          const res = await briefingApi.promptInteractiveConfirm({
+            agent: exec.agent,
+            signal: exec.signal,
+            scope,
+            settleNow: args.settleNow,
+          })
+          if (!res.ok && res.reason === 'USER_QUESTIONS_UNAVAILABLE') {
+            return `${res.briefing.markdown}\n\nInteractive userQuestions unavailable; confirm manually via memory_briefing(action="confirm", approveIds=[...], rejectIds=[...]).`
+          }
+          if (res.pendingCount === 0) return res.message
+          return `Briefing interactive confirmation complete: approved=${res.approved.length}, rejected=${res.rejected.length}${res.settlement ? `, settled=${res.settlement.committedCount}` : ''}.`
+        }
+
+        const res = await briefingApi.confirmItems({
+          approveIds: args.approveIds,
+          rejectIds: args.rejectIds,
+          reason: args.reason,
+          settleNow: args.settleNow === true,
+          scope,
+        })
+        briefingApi.markDelivered({ date: args.date?.trim() || undefined, scope, sessionId })
+
+        const warnings = [
+          ...(res.settlement?.profile?.warnings ?? []),
+          ...(res.settlement?.entity?.warnings ?? []),
+        ]
+        return [
+          `Morning briefing confirmed: approved=${res.approved.length} (${res.approved.join(', ') || 'none'}), rejected=${res.rejected.length} (${res.rejected.join(', ') || 'none'}).`,
+          ...(res.settlement ? [`Immediate settlement committed ${res.settlement.committedCount} item(s).`] : []),
+          ...(warnings.length > 0 ? [`Warnings: ${warnings.map(w => `${w.id}:${w.reason}`).join(', ')}`] : []),
+        ].join(' ')
       },
     }),
   ]

@@ -1,8 +1,57 @@
-import { logicalDateOf } from './util.js'
+import { extractJournalHighlights } from './briefing.js'
+import { clipText, logicalDateOf } from './util.js'
 
-export function createRolloverApi({ ctx, config, store, digestApi, contextApi, clock = { now: () => Date.now() }, onRollover, warn = () => {} }) {
+export function createRolloverApi({
+  ctx,
+  config,
+  store,
+  digestApi,
+  contextApi,
+  journalApi,
+  bufferApi,
+  clock = { now: () => Date.now() },
+  onRollover,
+  warn = () => {},
+}) {
   let lastActivityAt = clock.now()
   let running = null
+
+  function buildRolloverPayload(date, scope, digestResult) {
+    const journalPath = digestResult?.path ?? journalApi?.journalPath?.(config.home, date) ?? null
+    const rawJournal = journalApi?.readJournal?.(config.home, date) ?? ''
+    const highlights = rawJournal
+      ? extractJournalHighlights(rawJournal)
+      : {
+        title: `# ${date} 日报`,
+        happened: [],
+        decisions: [],
+        changes: [],
+        lessons: [],
+        openQuestions: [],
+        entities: [],
+        hasContent: false,
+      }
+    const pendingBufferCount = bufferApi?.listItems?.({ scope, statuses: ['pending'] })?.length ?? 0
+    const summaryLines = [
+      ...highlights.decisions.slice(0, 2).map(line => `决定：${line}`),
+      ...highlights.lessons.slice(0, 2).map(line => `教训：${line}`),
+      ...highlights.openQuestions.slice(0, 2).map(line => `待办/未决：${line}`),
+    ]
+    if (summaryLines.length === 0) {
+      summaryLines.push(...highlights.happened.slice(0, 2))
+    }
+    return {
+      date,
+      scope,
+      journalPath,
+      summary: {
+        title: highlights.title || `# ${date} 日报`,
+        highlights,
+        pendingBufferCount,
+        text: clipText(summaryLines.join('\n'), 500),
+      },
+    }
+  }
 
   function touchActivity(atMs = clock.now()) {
     if (atMs > lastActivityAt) lastActivityAt = atMs
@@ -46,11 +95,12 @@ export function createRolloverApi({ ctx, config, store, digestApi, contextApi, c
         rolledOver.push({ date, skipped: res.skipped })
         if (!res.skipped) {
           contextApi?.invalidateSnapshots?.()
+          const eventPayload = buildRolloverPayload(date, scope, res)
           try {
-            ctx?.emit?.('dsh-memory/day-rolled-over', { date, scope })
+            ctx?.emit?.('dsh-memory/day-rolled-over', eventPayload)
           } catch {}
           try {
-            await onRollover?.({ date, scope })
+            await onRollover?.(eventPayload)
           } catch (hookError) {
             warn('dsh-memory: onRollover hook failed for %s: %s', date, hookError?.message ?? hookError)
           }
