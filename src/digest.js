@@ -126,7 +126,7 @@ function buildDigestPrompt({ logicalDate, transcriptText, notes }) {
   return `目标逻辑日期：${logicalDate}\n\n请根据以下对话原文生成 "# ${logicalDate} 日报"：\n\n${transcriptText}${noteBlock}`
 }
 
-export function createDigestApi({ ctx, config, store, bufferApi, profileApi, journalApi, entityApi, historyApi, clock = { now: () => Date.now() }, warn = () => {} }) {
+export function createDigestApi({ ctx, config, store, bufferApi, profileApi, journalApi, entityApi, lessonApi, historyApi, clock = { now: () => Date.now() }, warn = () => {} }) {
   async function generateDailyDigest(logicalDate, { scope = 'default', force = false, signal } = {}) {
     const existing = journalApi.readJournal(config.home, logicalDate)
     if (existing !== '' && !force) {
@@ -218,6 +218,20 @@ export function createDigestApi({ ctx, config, store, bufferApi, profileApi, jou
       warn('dsh-memory: entity buffer item %s was not auto-committed (%s)', warning.id, warning.reason)
     }
 
+    const lessonSettlement = lessonApi
+      ? await bufferApi.settleLessonsForDate({
+        logicalDate,
+        scope,
+        store,
+        lessonApi,
+        config,
+      })
+      : { committed: [], deferred: [], warnings: [] }
+
+    for (const warning of lessonSettlement.warnings) {
+      warn('dsh-memory: lesson buffer item %s was not auto-committed (%s)', warning.id, warning.reason)
+    }
+
     let historyRefresh = null
     if (historyApi && config.sections.historyOverview.enabled) {
       try {
@@ -236,6 +250,7 @@ export function createDigestApi({ ctx, config, store, bufferApi, profileApi, jou
       closedNotes,
       profileSettlement,
       entitySettlement,
+      lessonSettlement,
       historyRefresh,
       chunks: chunks.length,
     }

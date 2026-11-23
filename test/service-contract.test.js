@@ -98,7 +98,7 @@ test('public Cordis service dshMemory and dsh-memory/day-rolled-over contract wo
   assert.equal(svc.contractVersion, 1)
   assert.equal(svc.serviceName, 'dshMemory')
   assert.equal(svc.getCurrentLogicalDate(), '2026-11-22')
-  assert.equal(registeredTools.size, 14)
+  assert.equal(registeredTools.size, 15)
 
   // 2. Onboarding control via public service
   assert.equal(svc.getOnboardingState().needsOnboarding, true)
@@ -171,6 +171,18 @@ test('public Cordis service dshMemory and dsh-memory/day-rolled-over contract wo
   assert.equal(verifiedCandidate.downgraded, false)
   assert.equal(profileApi.readProfile(dir), profileBefore)
 
+  const verifiedLessonCandidate = await svc.submitBufferCandidate({
+    sourceType: 'correction',
+    target: 'lesson:Nginx上线',
+    tags: ['deploy', 'nginx'],
+    triggers: ['nginx -t', '上线'],
+    content: '部署 Nginx 前必须先跑 nginx -t，否则会中断流量',
+    anchor: 'chat://2026-11-22#main#1',
+    producer: 'worker-postmortem',
+  })
+  assert.equal(verifiedLessonCandidate.ok, true)
+  assert.equal(verifiedLessonCandidate.sourceType, 'correction')
+
   // 5. Idle rollover emits enriched dsh-memory/day-rolled-over event
   nowMs = Date.parse('2026-11-23T02:35:00+08:00')
   const rolled = await memoryRuntime.rolloverApi.checkAndRollover({ isStartup: false })
@@ -182,26 +194,33 @@ test('public Cordis service dshMemory and dsh-memory/day-rolled-over contract wo
   assert.equal(evt.scope, 'default')
   assert.ok(evt.journalPath.endsWith('2026-11-22.md'))
   assert.equal(evt.summary.highlights.decisions.length, 1)
-  assert.equal(evt.summary.pendingBufferCount, 2)
+  assert.equal(evt.summary.pendingBufferCount, 3)
   assert.equal(evt.summary.text.includes('dshMemory'), true)
 
   // 6. Morning briefing API exposes yesterday highlights + pending buffer items & batch confirm works
   const briefing = svc.getMorningBriefing()
   assert.equal(briefing.date, '2026-11-23')
   assert.equal(briefing.yesterday.date, '2026-11-22')
-  assert.equal(briefing.buffer.totalPending, 2)
+  assert.equal(briefing.buffer.totalPending, 3)
   assert.equal(briefing.alreadyDelivered, false)
 
   const confirmed = await svc.confirmBufferItems({
-    approveIds: [verifiedCandidate.id],
+    approveIds: [verifiedCandidate.id, verifiedLessonCandidate.id],
     rejectIds: [spoofedCandidate.id],
     settleNow: true,
     reason: '上层 Bot 统一晨报批量确认',
   })
-  assert.equal(confirmed.approved.length, 1)
+  assert.equal(confirmed.approved.length, 2)
   assert.equal(confirmed.rejected.length, 1)
-  assert.equal(confirmed.settlement.committedCount, 1)
+  assert.equal(confirmed.settlement.committedCount, 2)
   assert.equal(profileApi.readProfile(dir).includes('复盘纠偏保留 correction 来源'), true)
+
+  const lessonMatches = svc.matchLessons('准备执行 nginx -t 上线', { tags: ['deploy'], maxTokens: 500 })
+  assert.equal(lessonMatches.totalMatched, 1)
+  assert.equal(lessonMatches.matches[0].name, 'Nginx上线')
+  assert.equal(lessonMatches.text.includes('nginx -t'), true)
+  assert.ok(svc.getLesson('Nginx上线'))
+  assert.equal(svc.listLessons().length, 1)
 
   // 7. Disposing plugin fiber cleans up dshMemory Cordis service cleanly
   await pluginFork.dispose()

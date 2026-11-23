@@ -107,7 +107,7 @@ function createE2eHarness(t, clock) {
   return { home, rt, tools, promptSections, emitSessionEvent, runTool }
 }
 
-test('E2E workflow across all 14 M1-M4 tools including context expansion, guard, dream, rollback, onboarding, briefing, correction, buffer, digest, history, entities, search, mode switch, and forget', async (t) => {
+test('E2E workflow across all 15 M1-M5 tools including lessons, context expansion, guard, dream, rollback, onboarding, briefing, correction, buffer, digest, history, entities, search, mode switch, and forget', async (t) => {
   let nowMs = Date.parse('2026-11-21T16:00:00+08:00')
   const clock = { now: () => nowMs }
   const { rt, tools, emitSessionEvent, runTool } = createE2eHarness(t, clock)
@@ -122,6 +122,7 @@ test('E2E workflow across all 14 M1-M4 tools including context expansion, guard,
     'memory_forget',
     'memory_history_browse',
     'memory_journal_read',
+    'memory_lesson_manage',
     'memory_mode_set',
     'memory_onboarding',
     'memory_read_context',
@@ -335,4 +336,38 @@ test('E2E workflow across all 14 M1-M4 tools including context expansion, guard,
   const rollbackOut = await runTool('memory_rollback', { entryId: tempEntry.id }, 'm3-session')
   assert.equal(rollbackOut.includes(`Rolled back profile entry ${tempEntry.id}`), true)
   assert.equal(rt.profileApi.readProfile(rt.config.home).includes('本周临时值班规则'), true)
+
+  // 9. M5 workflow: memory_lesson_manage CRUD, lesson buffer target settlement, forget redaction
+  const lesUpsert = await runTool('memory_lesson_manage', {
+    action: 'upsert',
+    name: 'Windows 测试脚本',
+    tags: ['windows', 'sqlite'],
+    triggers: ['node --test', 'EPERM'],
+    content: '清理临时目录前必须先调用 store.close()',
+  }, 'm3-session')
+  assert.equal(lesUpsert.includes('Updated lesson'), true)
+
+  const lesList = await runTool('memory_lesson_manage', { action: 'list' }, 'm3-session')
+  assert.equal(lesList.includes('Windows 测试脚本'), true)
+
+  const bufLes = await runTool('memory_buffer_add', {
+    target: 'lesson:Windows 测试脚本',
+    sourceType: 'explicit',
+    tags: ['e2e'],
+    triggers: ['rmSync'],
+    content: '使用 rmSync 时设置 maxRetries: 5',
+  }, 'm3-session')
+  assert.equal(bufLes.includes('target=lesson:Windows 测试脚本'), true)
+
+  const lesBufId = rt.bufferApi.listItems({ statuses: ['pending'] }).find(i => i.target === 'lesson:Windows 测试脚本').id
+  const lesSettled = await runTool('memory_buffer_manage', {
+    action: 'approve',
+    ids: [lesBufId],
+    settleNow: true,
+  }, 'm3-session')
+  assert.equal(lesSettled.includes('Immediate settlement committed 1 item(s)'), true)
+  assert.equal(rt.lessonApi.readLesson(rt.config.home, 'Windows 测试脚本').entries.some(e => e.content.includes('maxRetries: 5')), true)
+
+  const lesRead = await runTool('memory_lesson_manage', { action: 'read', name: 'Windows 测试脚本' }, 'm3-session')
+  assert.equal(lesRead.includes('store.close()'), true)
 })

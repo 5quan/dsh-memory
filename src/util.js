@@ -7,6 +7,8 @@ const CJK_RE = /[\u3400-\u9FFF\uF900-\uFAFF\u3040-\u30FF\uAC00-\uD7AF]/g
 const BUSY_CODES = new Set(['EPERM', 'EACCES', 'EBUSY'])
 const WIN_RENAME_TRIES = 6
 const WIN_RENAME_WAIT_MS = 40
+const WIN_RESERVED_RE = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i
+const ASCII_TRIGGER_RE = /^[a-z0-9_.\- ]+$/i
 
 const dayFormatters = new Map()
 const timeFormatters = new Map()
@@ -75,6 +77,45 @@ export function safeId(id) {
   return /^[\w-]{1,128}$/.test(text)
     ? text
     : createHash('sha256').update(text).digest('hex').slice(0, 32)
+}
+
+export function slugifyName(name, reservedPrefix = 'ent') {
+  const cleaned = String(name ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9\u3400-\u9FFF\uF900-\uFAFF-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  if (cleaned === '' || cleaned.length > 80) return safeId(name)
+  return WIN_RESERVED_RE.test(cleaned) ? `${reservedPrefix}-${cleaned}` : cleaned
+}
+
+export function escapeRegExp(str) {
+  return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+export function triggerMatchIndex(trigger, text, lowerText) {
+  const clean = String(trigger ?? '').trim()
+  if ([...clean].length < 2) return -1
+  if (ASCII_TRIGGER_RE.test(clean)) {
+    const re = new RegExp(`(?<![a-z0-9_])${escapeRegExp(clean)}(?![a-z0-9_])`, 'i')
+    const m = re.exec(text)
+    return m ? m.index : -1
+  }
+  return lowerText.indexOf(clean.toLowerCase())
+}
+
+export function mergeUniqueTerms(existing = [], incoming = []) {
+  const merged = []
+  const seen = new Set()
+  for (const raw of [...(Array.isArray(existing) ? existing : []), ...(Array.isArray(incoming) ? incoming : [])]) {
+    const val = String(raw ?? '').trim()
+    if (!val) continue
+    const lower = val.toLowerCase()
+    if (seen.has(lower)) continue
+    seen.add(lower)
+    merged.push(val)
+  }
+  return merged
 }
 
 export function estimateTokens(text) {

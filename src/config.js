@@ -89,6 +89,7 @@ export function normalizeConfig(raw = {}) {
       recentDays: sectionConfig(rawSections.recentDays, { enabled: true, days: 7, maxTokens: 2000 }),
       historyOverview: sectionConfig(rawSections.historyOverview, { enabled: true, maxTokens: 1000 }),
       entities: sectionConfig(rawSections.entities, { enabled: true, maxTokens: 1500 }),
+      lessons: sectionConfig(rawSections.lessons, { enabled: true, maxTokens: 1500 }),
     },
     buffer: {
       autoCommitSources: stringList(rawBuffer.autoCommitSources, ['explicit']),

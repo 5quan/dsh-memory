@@ -4,6 +4,7 @@ import { appendFile, mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { checkDuplicateContent, detectSecret, MemoryGuardError } from './guard.js'
 import * as defaultProfileApi from './profile.js'
+import { mergeUniqueTerms } from './util.js'
 
 export const BUFFER_DIR = 'buffer'
 export const VALID_TARGETS = ['profile', 'note']
@@ -17,10 +18,15 @@ export function bufferFilePath(home, logicalDate) {
 }
 
 export function isValidTarget(target) {
-  return target === 'profile' || target === 'note' || (typeof target === 'string' && target.startsWith('entity:') && target.length > 7)
+  return (
+    target === 'profile'
+    || target === 'note'
+    || (typeof target === 'string' && target.startsWith('entity:') && target.slice('entity:'.length).trim().length > 0)
+    || (typeof target === 'string' && target.startsWith('lesson:') && target.slice('lesson:'.length).trim().length > 0)
+  )
 }
 
-export function createBufferApi({ home, profileApi = defaultProfileApi, clock = { now: () => Date.now() } }) {
+export function createBufferApi({ home, profileApi = defaultProfileApi, lessonApi, clock = { now: () => Date.now() } }) {
   let writeChain = Promise.resolve()
 
   const queued = (task) => {
@@ -76,6 +82,8 @@ export function createBufferApi({ home, profileApi = defaultProfileApi, clock = 
           pinned: evt.pinned === true,
           ...(typeof evt.content_hash === 'string' && evt.content_hash !== '' ? { content_hash: evt.content_hash } : {}),
           ...(typeof evt.expires === 'string' && evt.expires !== '' ? { expires: evt.expires } : {}),
+          ...(Array.isArray(evt.tags) && evt.tags.length > 0 ? { tags: evt.tags } : {}),
+          ...(Array.isArray(evt.triggers) && evt.triggers.length > 0 ? { triggers: evt.triggers } : {}),
           ...(typeof evt.dream_key === 'string' && evt.dream_key !== '' ? { dream_key: evt.dream_key } : {}),
           ...(typeof evt.reason === 'string' && evt.reason !== '' ? { reason: evt.reason } : {}),
           ...(evt.conflict === true ? { conflict: true } : {}),
@@ -145,6 +153,9 @@ export function createBufferApi({ home, profileApi = defaultProfileApi, clock = 
       const profileEntries = target === 'profile' && profileApi
         ? profileApi.parseProfileEntries(profileApi.readProfile(home))
         : []
+      const lessonEntries = target.startsWith('lesson:') && lessonApi
+        ? (lessonApi.readLesson(home, target.slice('lesson:'.length).trim())?.entries ?? [])
+        : []
       const dup = checkDuplicateContent({
         content,
         scope,
@@ -153,6 +164,7 @@ export function createBufferApi({ home, profileApi = defaultProfileApi, clock = 
         op,
         bufferItems: activeItems,
         profileEntries,
+        lessonEntries,
       })
       if (dup.duplicate && input.allowDuplicate !== true) {
         return {
@@ -173,6 +185,8 @@ export function createBufferApi({ home, profileApi = defaultProfileApi, clock = 
       }
 
       const id = input.id || `buf_${logicalDate.replaceAll('-', '')}_${randomUUID().slice(0, 8)}`
+      const tags = mergeUniqueTerms([], Array.isArray(input.tags) ? input.tags : [])
+      const triggers = mergeUniqueTerms([], Array.isArray(input.triggers) ? input.triggers : [])
       const event = {
         event: 'create',
         id,
@@ -188,6 +202,8 @@ export function createBufferApi({ home, profileApi = defaultProfileApi, clock = 
         supersedes_id: input.supersedesId ?? input.supersedes_id ?? null,
         anchor: input.anchor ?? null,
         pinned: input.pinned === true,
+        ...(tags.length > 0 ? { tags } : {}),
+        ...(triggers.length > 0 ? { triggers } : {}),
         ...(typeof input.expires === 'string' && input.expires.trim() !== '' ? { expires: input.expires.trim() } : {}),
         ...(typeof input.dreamKey === 'string' && input.dreamKey.trim() !== '' ? { dream_key: input.dreamKey.trim() } : {}),
         ...(typeof input.reason === 'string' && input.reason.trim() !== '' ? { reason: input.reason.trim() } : {}),
@@ -431,6 +447,42 @@ export function createBufferApi({ home, profileApi = defaultProfileApi, clock = 
     })
   }
 
+  function settleLessonsForDate({ logicalDate, scope = 'default', store, lessonApi, config }) {
+    return settleWithGate({
+      logicalDate,
+      scope,
+      store,
+      config,
+      filter: item => typeof item.target === 'string' && item.target.startsWith('lesson:'),
+      resolveOverwrite: (item) => {
+        const lessonName = item.target.slice('lesson:'.length).trim()
+        const existing = lessonApi.readLesson(config.home, lessonName)
+        const targetEntry = item.supersedes_id ? existing?.entries.find(e => e.id === item.supersedes_id) : undefined
+        return item.op !== 'add' || Boolean(item.supersedes_id) || Boolean(targetEntry?.pinned)
+      },
+      applyItem: async (item, effectiveSource) => {
+        const lessonName = item.target.slice('lesson:'.length).trim()
+        const result = await lessonApi.upsertLesson(config.home, {
+          name: lessonName,
+          tags: item.tags,
+          triggers: item.triggers,
+          op: item.op,
+          content: item.content,
+          targetId: item.supersedes_id,
+          supersedesId: item.supersedes_id,
+          added: item.logical_date,
+          source: item.anchor || effectiveSource,
+          ...(item.expires ? { expires: item.expires } : {}),
+          pinned: item.pinned,
+          allowPinned: item.status === 'approved',
+        })
+        return result.ok
+          ? { ...result, commitReason: `committed to lessons/${result.slug}.md (${result.entryId ?? 'card'})` }
+          : result
+      },
+    })
+  }
+
   function closeNotesForDate({ logicalDate, scope = 'default' }) {
     return queued(async () => {
       const notes = [...loadFoldedMap(logicalDate).values()].filter(
@@ -453,10 +505,11 @@ export function createBufferApi({ home, profileApi = defaultProfileApi, clock = 
     })
   }
 
-  async function settleDates({ dates = [], scope = 'default', store, profileApi, entityApi, config }) {
+  async function settleDates({ dates = [], scope = 'default', store, profileApi, entityApi, lessonApi, config }) {
     const uniqueDates = [...new Set(dates.filter(Boolean))].sort()
     const profile = { committed: [], deferred: [], warnings: [] }
     const entity = { committed: [], deferred: [], warnings: [] }
+    const lesson = { committed: [], deferred: [], warnings: [] }
 
     for (const logicalDate of uniqueDates) {
       if (profileApi) {
@@ -471,13 +524,20 @@ export function createBufferApi({ home, profileApi = defaultProfileApi, clock = 
         entity.deferred.push(...eRes.deferred)
         entity.warnings.push(...eRes.warnings)
       }
+      if (lessonApi) {
+        const lRes = await settleLessonsForDate({ logicalDate, scope, store, lessonApi, config })
+        lesson.committed.push(...lRes.committed)
+        lesson.deferred.push(...lRes.deferred)
+        lesson.warnings.push(...lRes.warnings)
+      }
     }
 
     return {
       dates: uniqueDates,
       profile,
       entity,
-      committedCount: profile.committed.length + entity.committed.length,
+      lesson,
+      committedCount: profile.committed.length + entity.committed.length + lesson.committed.length,
     }
   }
 
@@ -492,6 +552,7 @@ export function createBufferApi({ home, profileApi = defaultProfileApi, clock = 
     rejectForForget,
     settleProfileForDate,
     settleEntitiesForDate,
+    settleLessonsForDate,
     settleDates,
     closeNotesForDate,
   }

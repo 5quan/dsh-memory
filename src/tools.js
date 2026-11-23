@@ -47,6 +47,7 @@ export function createToolsApi({
   contextApi,
   historyApi,
   entityApi,
+  lessonApi,
   onboardingApi,
   briefingApi,
   profileApi = defaultProfileApi,
@@ -224,11 +225,13 @@ export function createToolsApi({
       parameters: {
         content: { type: 'string', required: true, description: 'Concise memory fact, preference, or correction to record.' },
         sourceType: { type: 'string', enum: ['explicit', 'correction', 'extracted'], required: true, description: 'Origin of this memory item.' },
-        target: { type: 'string', description: 'Target store: "profile" (default), "note" (for today journal), or "entity:<name>".' },
+        target: { type: 'string', description: 'Target store: "profile" (default), "note" (for today journal), "entity:<name>", or "lesson:<name>".' },
         section: { type: 'string', description: 'Target section name in PROFILE.md (e.g. "沟通与工作偏好").' },
+        tags: { type: 'array', items: { type: 'string' }, description: 'Optional tags when target is "lesson:<name>" (e.g. ["deploy", "nginx"]).' },
+        triggers: { type: 'array', items: { type: 'string' }, description: 'Optional trigger keywords when target is "lesson:<name>".' },
         op: { type: 'string', enum: ['add', 'replace', 'retire'], description: 'Operation type (default "add").' },
-        supersedesId: { type: 'string', description: 'Existing PROFILE entry id to replace or retire.' },
-        expires: { type: 'string', description: 'Optional expiration date (YYYY-MM-DD) for phase-limited facts.' },
+        supersedesId: { type: 'string', description: 'Existing PROFILE/entity/lesson entry id to replace or retire.' },
+        expires: { type: 'string', description: 'Optional expiration date (YYYY-MM-DD) for phase-limited facts or lessons.' },
         pinned: { type: 'boolean', description: 'Whether to mark as pinned (protected from automated Dream deletion).' },
       },
       output: stringOutput,
@@ -265,6 +268,8 @@ export function createToolsApi({
             content: args.content,
             supersedesId: args.supersedesId ?? null,
             expires: args.expires?.trim() || undefined,
+            tags: args.tags,
+            triggers: args.triggers,
             anchor: boundAnchor,
             pinned: args.pinned === true,
           })
@@ -330,6 +335,7 @@ export function createToolsApi({
           const warnings = [
             ...(res.settlement?.profile?.warnings ?? []),
             ...(res.settlement?.entity?.warnings ?? []),
+            ...(res.settlement?.lesson?.warnings ?? []),
           ]
           return [
             `Updated ${res.approved.length} buffer item(s) to "approved": ${res.approved.join(', ')}.`,
@@ -350,7 +356,7 @@ export function createToolsApi({
         if (nextStatus === 'approved' && args.settleNow === true && profileApi) {
           const updatedSet = new Set(updated)
           const dates = existingItems.filter(i => updatedSet.has(i.id)).map(i => i.logical_date)
-          const settlement = await bufferApi.settleDates({ dates, scope, store, profileApi, entityApi, config })
+          const settlement = await bufferApi.settleDates({ dates, scope, store, profileApi, entityApi, lessonApi, config })
           if (settlement.profile.committed.length > 0) contextApi?.invalidateSnapshots?.()
           return `Updated ${updated.length} buffer item(s) to "approved": ${updated.join(', ')}. Immediate settlement committed ${settlement.committedCount} item(s).`
         }
@@ -426,10 +432,17 @@ export function createToolsApi({
         const entityCountText = res.entitySettlement
           ? `, Entities committed: ${res.entitySettlement.committed.length}, Entity deferred: ${res.entitySettlement.deferred.length}`
           : ''
-        const allWarnings = [...res.profileSettlement.warnings, ...(res.entitySettlement?.warnings ?? [])]
+        const lessonCountText = res.lessonSettlement
+          ? `, Lessons committed: ${res.lessonSettlement.committed.length}, Lesson deferred: ${res.lessonSettlement.deferred.length}`
+          : ''
+        const allWarnings = [
+          ...res.profileSettlement.warnings,
+          ...(res.entitySettlement?.warnings ?? []),
+          ...(res.lessonSettlement?.warnings ?? []),
+        ]
         return [
           `Generated journal for ${targetDate} (${res.chunks} chunk(s)): ${res.path}`,
-          `Notes closed: ${res.closedNotes.length}, Profile committed: ${res.profileSettlement.committed.length}, Deferred: ${res.profileSettlement.deferred.length}${entityCountText}`,
+          `Notes closed: ${res.closedNotes.length}, Profile committed: ${res.profileSettlement.committed.length}, Deferred: ${res.profileSettlement.deferred.length}${entityCountText}${lessonCountText}`,
           ...(res.unverifiedAnchors.length > 0 ? [`Stripped unverified anchors: ${res.unverifiedAnchors.join(', ')}`] : []),
           ...(allWarnings.length > 0
             ? [`Warnings: ${allWarnings.map(w => `${w.id}:${w.reason}`).join(', ')}`]
@@ -440,13 +453,13 @@ export function createToolsApi({
 
     defineTool({
       name: 'memory_forget',
-      description: 'Actively forget memories requested by the user: permanently deletes matching messages from archive and FTS5, rejects matching buffer items, redacts matching lines in daily journals, entities, and history index, removes matching entries from PROFILE.md and retired.jsonl, and invalidates snapshots.',
+      description: 'Actively forget memories requested by the user: permanently deletes matching messages from archive and FTS5, rejects matching buffer items, redacts matching lines in daily journals, entities, lessons, and history index, removes matching entries from PROFILE.md and retired.jsonl, and invalidates snapshots.',
       parameters: {
         anchor: { type: 'string', description: 'Exact chat:// anchor to forget.' },
         date: { type: 'string', description: 'Optional logical date filter (YYYY-MM-DD).' },
         keyword: { type: 'string', description: 'Optional substring/keyword to forget.' },
         sessionId: { type: 'string', description: 'Optional session id filter.' },
-        force: { type: 'boolean', description: 'If true, also remove matched pinned entries in PROFILE.md.' },
+        force: { type: 'boolean', description: 'If true, also remove matched pinned entries in PROFILE.md and lessons/.' },
       },
       output: stringOutput,
       async execute(args, exec) {
@@ -500,6 +513,15 @@ export function createToolsApi({
           })
           : { updatedEntities: [] }
 
+        const redactedLessons = lessonApi
+          ? await lessonApi.redactLessonsForForget(config.home, {
+            anchors: anchorsToReject,
+            keyword: cleanKeyword,
+            force: args.force === true,
+            todayDate,
+          })
+          : { updatedLessons: [], skippedPinnedIds: [] }
+
         const redactedHistory = historyApi
           ? await historyApi.redactHistoryForForget({
             anchors: anchorsToReject,
@@ -532,6 +554,7 @@ export function createToolsApi({
           `Rejected ${rejectedBufferIds.length} buffer item(s).`,
           `Redacted ${redactedJournals.length} daily journal(s)${redactedJournals.length > 0 ? `: ${redactedJournals.join(', ')}` : ''}.`,
           `Redacted ${redactedEntities.updatedEntities.length} entity card(s)${redactedEntities.updatedEntities.length > 0 ? `: ${redactedEntities.updatedEntities.join(', ')}` : ''}.`,
+          `Redacted ${redactedLessons.updatedLessons.length} lesson card(s)${redactedLessons.updatedLessons.length > 0 ? `: ${redactedLessons.updatedLessons.join(', ')}` : ''}${redactedLessons.skippedPinnedIds.length > 0 ? ` (skipped pinned: ${redactedLessons.skippedPinnedIds.join(', ')}; pass force=true to delete)` : ''}.`,
           `Redacted ${redactedHistory.updatedMonths.length} history month(s)${redactedHistory.updatedMonths.length > 0 ? `: ${redactedHistory.updatedMonths.join(', ')}` : ''}.`,
           `Removed ${redactedProfile.removedIds.length} profile entry(s)${redactedProfile.skippedPinnedIds.length > 0 ? ` (skipped pinned: ${redactedProfile.skippedPinnedIds.join(', ')}; pass force=true to delete)` : ''}.`,
           `Purged ${purgedRetired.purgedCount} retired record(s).`,
@@ -672,6 +695,85 @@ export function createToolsApi({
           return `Failed to upsert entity "${name}": ${res.reason}.`
         }
         return `Updated entity "${res.entity.name}" (${res.slug})${res.factId ? `, fact=${res.factId}` : ''}.`
+      },
+    }),
+
+    defineTool({
+      name: 'memory_lesson_manage',
+      description: 'List, read, create/update, or delete procedural lesson/pitfall cards in lessons/ along with their tags and trigger keywords.',
+      parameters: {
+        action: { type: 'string', enum: ['list', 'read', 'upsert', 'delete'], required: true, description: 'Operation on lesson cards.' },
+        name: { type: 'string', description: 'Lesson card name or slug (required for read/upsert/delete).' },
+        tags: { type: 'array', items: { type: 'string' }, description: 'Topic/domain tags (e.g. ["deploy", "nginx"]).' },
+        triggers: { type: 'array', items: { type: 'string' }, description: 'Keywords or phrases that automatically trigger dynamic context injection.' },
+        content: { type: 'string', description: 'Lesson/pitfall content to add or replace.' },
+        op: { type: 'string', enum: ['add', 'replace', 'retire'], description: 'Entry mutation operation on upsert (default "add").' },
+        supersedesId: { type: 'string', description: 'Existing lesson entry id (e.g. les_01) to replace or retire.' },
+        pinned: { type: 'boolean', description: 'Pin this entry against automated deletion.' },
+        expires: { type: 'string', description: 'Optional expiration date (YYYY-MM-DD) for temporary operational caveats.' },
+        force: { type: 'boolean', description: 'Force delete even when the lesson card holds pinned entries.' },
+      },
+      output: stringOutput,
+      isConcurrencySafe: args => args?.action === 'list' || args?.action === 'read',
+      async execute(args, exec) {
+        const sessionId = exec.agent?.id
+        const mode = effectiveModeOf(sessionId)
+        if (mode === 'off') {
+          return 'Memory is disabled (mode=off) for this session.'
+        }
+        if (!lessonApi) {
+          return 'Lesson cards module is not available.'
+        }
+
+        if (args.action === 'list') {
+          const lessons = lessonApi.listLessons(config.home)
+          if (lessons.length === 0) return 'No lesson cards saved yet.'
+          return lessons
+            .map(l => `- ${l.name} [${l.slug}] (tags: ${l.tags.join(', ') || 'none'}; triggers: ${l.triggers.join(', ') || 'none'}; entries: ${l.entries.length})`)
+            .join('\n')
+        }
+
+        const name = args.name?.trim()
+        if (!name) return `Please provide "name" for lesson action "${args.action}".`
+
+        if (args.action === 'read') {
+          const lesson = lessonApi.readLesson(config.home, name)
+          return lesson ? lesson.raw : `No lesson card found matching "${name}".`
+        }
+
+        if (mode !== 'full') {
+          return `Cannot modify lesson cards while session mode is "${mode}".`
+        }
+
+        if (args.action === 'delete') {
+          const res = await lessonApi.deleteLesson(config.home, name, { force: args.force === true })
+          if (!res.ok) return `Failed to delete lesson "${name}": ${res.reason}.`
+          return `Deleted lesson card "${res.slug}".`
+        }
+
+        const latestUser = sessionId
+          ? (store.getLatestUserOrCardMessage?.(sessionId) ?? store.getLatestUserMessage(sessionId))
+          : undefined
+        const res = await lessonApi.upsertLesson(config.home, {
+          name,
+          tags: args.tags,
+          triggers: args.triggers,
+          op: args.op ?? 'add',
+          content: args.content,
+          supersedesId: args.supersedesId,
+          expires: args.expires?.trim() || undefined,
+          added: currentLogicalDate(),
+          source: latestUser?.anchor ?? 'manual',
+          pinned: args.pinned === true,
+          allowPinned: true,
+        })
+        if (!res.ok) {
+          return `Failed to upsert lesson "${name}": ${res.reason}${res.message ? ` (${res.message})` : ''}.`
+        }
+        if (res.duplicate) {
+          return `Skipped duplicate lesson entry in "${res.lesson.name}" (${res.slug}), existing=${res.entryId}.`
+        }
+        return `Updated lesson "${res.lesson.name}" (${res.slug})${res.entryId ? `, entry=${res.entryId}` : ''}.`
       },
     }),
 
@@ -865,6 +967,7 @@ export function createToolsApi({
         const warnings = [
           ...(res.settlement?.profile?.warnings ?? []),
           ...(res.settlement?.entity?.warnings ?? []),
+          ...(res.settlement?.lesson?.warnings ?? []),
         ]
         return [
           `Morning briefing confirmed: approved=${res.approved.length} (${res.approved.join(', ') || 'none'}), rejected=${res.rejected.length} (${res.rejected.join(', ') || 'none'}).`,
@@ -919,6 +1022,9 @@ export function createToolsApi({
         }
         if (res.diagnostics?.oversizedEntities?.length > 0) {
           header.push(`Oversized entity cards: ${res.diagnostics.oversizedEntities.join(', ')}`)
+        }
+        if (res.diagnostics?.oversizedLessons?.length > 0) {
+          header.push(`Oversized lesson cards: ${res.diagnostics.oversizedLessons.join(', ')}`)
         }
         return header.join('\n')
       },
