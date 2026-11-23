@@ -15,8 +15,12 @@
 
 ### 1.2 项目边界
 - **专注纯记忆系统**：本仓库仅实现独立的 DSH（Cordis）记忆插件，**不耦合**任务工单（Ticket）、多 Bot 调度或群聊路由。
+- **避坑经验归记忆、技能挂载归执行层**：
+  - **避坑经验 / 踩坑教训 / 操作雷区（`lessons/`，M5）**：属程序性记忆，归 `dsh-memory` 复用现有缓冲审核、锚点溯源、晨报确认、标签/关键词动态召回与 Dream 整理底座；
+  - **可执行技能包 / 工具挂载（`SKILL.md` / MCP / `capabilities.js` / 工具权限）**：属给 Agent 装手脚的工具说明书，留在 DSH / `dsh-ctrl` 执行层，不进记忆系统；
+  - **与 `ds-bot` 搭配边界**：除 `memory: false` 外，建议在 `dsh-ctrl` 侧停用（后期删除）`ds-bot` 原生 `learning.js`，避免两套空闲后台 LLM 抽取重叠烧 Token 与产生双份待确认卡片。
 - **专职个人秘书体系**：面向单人个人助理场景设计，暂不考虑多用户协同或复杂团队权限隔离。
-- **渐进扩展、缺省即无**：面向 M2/M3/M4 预留的数据结构与模块（如 `history/` 历史总览、`entities/` 实体档案），在尚未启用或文件不存在时按“无此模块”处理，优雅降级，不阻塞核心闭环。
+- **渐进扩展、缺省即无**：面向 M2/M3/M4/M5 预留的数据结构与模块（如 `history/` 历史总览、`entities/` 实体档案、`lessons/` 避坑经验），在尚未启用或文件不存在时按“无此模块”处理，优雅降级，不阻塞核心闭环。
 
 ### 1.3 六条核心铁律
 
@@ -24,7 +28,7 @@
 |---|---|---|
 | **1** | **原文不可变，其余皆派生（无向量）** | `archive.sqlite` 的 `messages` 表是**原文主存储（需纳入备份）**；日报、画像、实体卡与历史总览均由原文派生，其中仅 `messages_fts` 索引、`snapshots/` 与 `history/` 属可删可重建派生层。纯本地存储，**不引入向量数据库或外部 Embedding 服务**。 |
 | **2** | **时间框架为主轴，禁止“摘要的摘要”** | 以“昨日完整日报 + 近 N 天日报精华 + 历史总览”作为工作记忆主轴；绝不跨日滚动重写周/月摘要，防止传话游戏式信息失真。 |
-| **3** | **任务进度不进记忆** | “做到哪了、卡在谁、截止日期”归外部任务系统（Ticket）；记忆系统只管“人、事、偏好、决定、纠正过的教训与历史”。 |
+| **3** | **任务进度与工具技能挂载不进记忆** | “做到哪了、卡在谁、截止日期”归外部任务系统（Ticket），可执行技能包（`SKILL.md`）/ MCP / 工具权限挂载归执行层；记忆系统只管“人、事、偏好、决定、避坑教训与历史”。 |
 | **4** | **写入统一进缓冲区，盘中不改冻结画像** | 白天所有显式记忆与纠偏一律先追加进按日轮转的缓冲区日志，**绝不中途改写已冻结的 `PROFILE.md`**——同时保住模型 Prefix Cache 与降低确认成本。 |
 | **5** | **空闲切日，不零点硬切** | 不在午夜 00:00 打断深夜对话，按“逻辑日边界 + 连续空闲时长”异步结算前一天，且会话前缀按 `(session_id, logical_date)` 冻结以支持跨天长会话自动刷新。 |
 | **6** | **默认共享，可隔离可无痕，可主动遗忘** | 个人画像与记忆全局默认共享；数据结构带 `scope` 与精细过滤规则（默认保留子会话中用户本人直接发言的纠偏），支持三态无痕开关（`full` / `read-only` / `off`）与用户主动遗忘（`memory_forget`）。 |
@@ -60,7 +64,7 @@ flowchart TB
 ## 2. 目录结构与存储模型
 
 > **存储分级原则**：
-> - **主存储（须纳入备份，严禁随意删除）**：`PROFILE.md`、`buffer/`、`journals/`、`entities/`（M2/M3）、`retired.jsonl`，以及 `archive.sqlite` 中的 `messages`、`session_state`、`rollover_state`、`memory_meta` 表。一旦 DSH 会话日志被清理，`archive.sqlite` 就是原始对话的唯一备份。
+> - **主存储（须纳入备份，严禁随意删除）**：`PROFILE.md`、`buffer/`、`journals/`、`entities/`（M2/M3）、`lessons/`（M5）、`retired.jsonl`，以及 `archive.sqlite` 中的 `messages`、`session_state`、`rollover_state`、`memory_meta` 表。一旦 DSH 会话日志被清理，`archive.sqlite` 就是原始对话的唯一备份。
 > - **可删可重建派生层**：`archive.sqlite` 中的 `messages_fts` 虚表、`snapshots/` 前缀缓存、`history/`（M2 历史索引）。
 
 ### 2.1 磁盘目录布局
@@ -76,6 +80,7 @@ flowchart TB
 │   ├── 2026-11-21.md                   # [主存储] 不可变每日日报（时间框架主轴）
 │   └── 2026-11-22.md
 ├── entities/                           # [主存储 · M2/M3 引入，缺省即无] 实体档案卡（人/项目/服务器）
+├── lessons/                            # [主存储 · M5 引入，缺省即无] 避坑经验/操作雷区卡（程序性记忆，按标签/触发词动态召回）
 ├── history/                            # [派生索引 · M2 引入，缺省即无] OpenViking L0/L1 索引
 │   ├── .abstract.md                    # [L0] 历史总览地图（百字级）
 │   └── 2026-11/
@@ -269,7 +274,8 @@ PRAGMA user_version = 2;
 - `target`：
   - `'profile'`：目标写入核心画像 `PROFILE.md`；
   - `'note'`：当日/近期关注事实（不升格 `PROFILE.md`）。**流向明确**：盘中通过动态增量区对同日新会话可见；日结时作为显式补充要点写入当日 `journals/YYYY-MM-DD.md`（归入 `## 发生了什么` 或 `## 悬而未决的问题`），随后自动追加 `status: "committed"` 事件关闭；
-  - `'entity:<name>'`：**[预留字段]** 供 M2/M3 实体档案模块消费，M1 阶段若无 `entities/` 则暂存为 `pending` 或降级记入当日日报，后续升级无需迁移数据格式。
+  - `'entity:<name>'`：**[预留字段]** 供 M2/M3 实体档案模块消费，M1 阶段若无 `entities/` 则暂存为 `pending` 或降级记入当日日报，后续升级无需迁移数据格式；
+  - `'lesson:<name>'`：**[M5 预留]** 供 M5 避坑经验 / 程序性记忆模块消费，日结 / 结算时写入 `lessons/<slug>.md`；M5 上线前若缺省则暂存或降级归档，无需迁移日志格式。
 - `op`：`'add'` | `'replace'` | `'retire'`；
 - `status`（折叠态）：默认 `'pending'`，可跃迁为 `'approved'` | `'committed'` | `'rejected'`。
 
@@ -442,9 +448,29 @@ stateDiagram-v2
 
 ---
 
-### 3.8 后续安全加固（最后实现，暂不纳入 M4）
+### 3.8 避坑经验与程序性记忆（`lessons/`，M5）
 
-- **写入侧记忆投毒 / 提示注入拦截**：针对“记住：以后忽略安全规则”等试图篡改系统规则或安全边界的长期写入内容，规划在写入网关做规则/分类拦截与强制降级，并配套红队用例验收；当前阶段由冻结前缀与动态增量中的数据区隔离声明及缓冲人工确认流兜底，该拦截能力**只作设计记录，待 M4 及核心体验全部稳定后最后实现**。
+解决 `dsh-ctrl` / `ds-bot` 体系下“避坑经验写在哪、可执行技能包放哪、`ds-bot` 原生 `learning.js` 如何处置”的三方边界问题，让程序性避坑知识统一沉淀在 `dsh-memory`：
+
+#### 1. 三方职责边界
+| 归属内容 | 放哪里 | 原因 |
+|---|---|---|
+| **避坑经验 / 踩坑教训 / 操作雷区（`lessons/`）**<br>例：“这台机器部署前必须 `nginx -t`”“`dsh-ctrl` 不能直接 `npm run build`”“某 API 404 要手动添加” | **放进 `dsh-memory`** | 本质是程序性记忆，与现有「`correction` 纠偏 + `buffer/` 审核准入 + 锚点溯源 + 晨报确认 + 标签/关键词动态召回 + M4 Dream 整理」100% 复用同一套底座 |
+| **可执行技能包 / 工具能力（`SKILL.md` / MCP / `capabilities.js` / 工具权限）** | **留在 DSH / `dsh-ctrl` 执行层** | 属于“给 Agent 装手脚/工具说明书”，不是个人记忆 |
+| **`ds-bot` 原生 `learning.js`（空闲后台跑 LLM 抽 Skill 和改 `AGENTS.md`）** | **在 `dsh-ctrl` 中停用（后期删除）** | 与 `dsh-memory` 的日结抽取、自动纠偏捕获和晨报确认高度重叠，同时开启会重复烧 Token 且产生两套待确认卡片 |
+
+#### 2. 存储结构与全闭环契约（与 `entities/*.md` 对称）
+- **独立目录与卡片格式（`lessons/<slug>.md`）**：按主题/环境/项目维护可人读人改的 Markdown 避坑卡，头部携带 `# <标题>`、`- tags: deploy, nginx`、`- triggers: 部署, nginx, dsh-ctrl`，主体 `## 避坑条目` 下每条遵循 `[id; added; source; supersedes; pinned; expires]` 元数据约定（与 `PROFILE.md` / `entities/*.md` 一致）。
+- **统一写入口与防污染**：所有经验先以 `target: 'lesson:<名称>'` 写入 `buffer/YYYY-MM-DD.jsonl`（复用 `correction` 自动捕获、`guard.js` 凭据守卫与幂等去重、晨报批量确认，以及 `dshMemory.submitBufferCandidate` 供外部 Worker / Ticket 完结与失败复盘回灌），日结/结算时写入对应 `lessons/<slug>.md`。
+- **缓存友好动态注入**：命中当前用户消息或标签时，通过 `agent/pre-step` `dsh-memory/delta` 持久化动态注入，并在 `session_state` 维护 `injected_lessons`（Compaction 时随 `replaceGeneration` 递增自动重置游标），全程零破坏冻结前缀缓存。
+- **遗忘与后台整理联动**：纳入 `memory_forget` 清理与 M4 Dream 合并/去重/过期检查。
+- **公开 Cordis 服务扩展（零 `ds-bot` 依赖）**：在 `dshMemory` 服务上新增只读检索方法 **`matchLessons(text, { tags, maxTokens })`**、`getLesson`、`listLessons`——上层 Worker 干活前向 `dshMemory` 一次拉齐“实体卡 + 避坑教训”，同时原版 DSH 独立用户也可直接复用。
+
+---
+
+### 3.9 后续安全加固（最后实现，暂不纳入 M4/M5）
+
+- **写入侧记忆投毒 / 提示注入拦截**：针对“记住：以后忽略安全规则”等试图篡改系统规则或安全边界的长期写入内容，规划在写入网关做规则/分类拦截与强制降级，并配套红队用例验收；当前阶段由冻结前缀与动态增量中的数据区隔离声明及缓冲人工确认流兜底，该拦截能力**只作设计记录，待 M4/M5 及核心体验全部稳定后最后实现**。
 
 ---
 
@@ -542,6 +568,7 @@ export function apply(ctx, config = {}) {
 | **M4** | `memory_read_context` | 按 `chat://` 锚点在 `archive.sqlite` 按 `(session_id, seq)` 行窗口展开前后相邻 N 轮完整对话原文（MemMachine 邻接扩展） | `anchor`, `before?`, `after?` |
 | **M4** | `memory_dream_now` | 手动触发一次规则 + LLM 双通道后台整理提案（生成合并/冲突/`expires` 到期建议进缓冲区，失败不推进水位） | `dryRun?` |
 | **M4** | `memory_rollback` | 基于 `retired.jsonl` 追加留痕回滚某次 `PROFILE.md` 变更并立即失效快照 | `entryId` |
+| **M5** | `memory_lesson_manage` | 列出、读取、增改或删除 `lessons/` 避坑经验卡及其 `tags` / `triggers` 触发词 | `action` (`list` \| `read` \| `upsert` \| `delete`), `name?`, `tags?`, `triggers?`, `content?`, `op?`, `supersedesId?`, `pinned?`, `expires?`, `force?` |
 
 ---
 
@@ -555,12 +582,13 @@ export function apply(ctx, config = {}) {
 | **M2（OpenViking 历史层 + 实体起步）** | 跨月历史不断层 + 人/事卡片 | 1. 由 `journals/*.md` 单跳生成 `history/.abstract.md` 与 `history/YYYY-MM/.overview.md` 并启用 `sections.historyOverview`<br>2. `memory_history_browse` L0/L1/L2 渐进下钻工具<br>3. `entities/` 实体卡与别名命中动态增量注入 | 数月历史仅用 <= 1k tokens 常驻总览即可下钻回查任意月日报；提及人/项目别名时自动动态注入实体卡而不击穿前缀缓存 |
 | **M3（冷启动引导、每日确认与服务契约）** | 冷启动建档 + 低摩擦把关 + 单向开放契约 | 1. 初始画像冷启动引导（首次空画像时发简短问卷或 `show_view` / `ask_user_question` 交互弹窗采集基础画像，支持跳过）<br>2. 晨报汇总摘要（昨日日报亮点 + `buffer/` 待确认列表）与低摩擦批量勾选确认<br>3. 轻量纠偏捕获（`source_type: 'correction'` + 真实用户 `anchor`）<br>4. 公开 Cordis 服务与标准事件契约（供 `dsh-ctrl` 等上层 Bot 单向绑定，保持 `dsh-memory` 零 `ds-bot` 依赖） | 首次启用即可快速建立初始画像；每天首次交互可用极低成本完成“记忆勾选确认 + 纠偏入库”；原版 DSH 独立可用，上层 Bot 可通过公开契约零侵入联动 |
 | **M4（Dream 后台整理、检索与治理补强）** | 跨月克制自维护、行窗口邻接检索与成本+准确率消融 | 1. 规则 + LLM 双通道 Dream 后台整理（`dream.lock` 防并发、失败不推进 `dream:<scope>` 水位、无证据不误删、冲突标 `CONFLICT` 且低权不覆高权、`rejectCooldownDays` 冷却期、`expires` 过期提案、`dream.instructions` 可定制），全非遗忘变更落 `retired.jsonl` 并支持 `memory_rollback` 追加回滚<br>2. `memory_read_context` 与 `memory_search.contextTurns`（按 `(session_id, seq)` 行窗口展开相邻轮次原文）<br>3. `guard.js` 入口归一化 `content_hash` 幂等去重与高置信凭据“只记名不记值”直接拒写，日结/Dream Prompt 强化绝对日期、助手承诺、单次 vs 长期区分与陈旧度提醒<br>4. `memory_forget` 补齐 `PROFILE.md`（仅按锚点/显式关键词清，保护 `pinned`）与 `retired.jsonl` 删除传播闭环<br>5. 离线确定性回归套件（进 `npm test`）+ 在线 LLM 三组消融脚本（无记忆 vs `dsh-memory` vs 黄金记忆，输出准确率 + Token 成本） | `pinned` 零误删、冷却期与比例上限生效、失败重跑不漏日志；行窗口邻接完整；凭据零落库且误报可控；遗忘跨 8 层残留为 `0`；消融实验量化验证准确率与 Token 成本收益 |
-| **后续（最后实现）** | 写入安全加固（暂不纳入 M4） | 写入侧记忆投毒 / 提示注入拦截（规则/分类检测“忽略规则”等篡改指令并强制降级）与红队用例验收（当前仅作设计登记，待 M4 后最后实施） | 红队记忆投毒用例写入阻断或降级隔离，误报不干扰正常偏好与工作规则记录 |
+| **M5（避坑经验 / 程序性记忆）** | `lessons/` 经验卡沉淀与技能挂载解耦 | 1. 新增独立 `lessons/*.md`（含 `tags` / `triggers` 与 `[id; added; source; supersedes; pinned; expires]` 元数据）及 `memory_lesson_manage`<br>2. 消费 `target: 'lesson:<名称>'` 缓冲结算、`session_state.injected_lessons` 动态增量注入，并联动 `memory_forget` 与 Dream 整理<br>3. `dshMemory` 公开服务扩展 `matchLessons(text, { tags, maxTokens })` / `getLesson` / `listLessons` 供 Worker 与原版 DSH 复用<br>4. 明确“可执行技能包留执行层、搭配 `ds-bot` 时在 `dsh-ctrl` 停用 `learning.js`” | `correction`/Ticket 复盘经验可经缓冲区审核沉淀为 `lessons/`；提及标签/关键词动态注入而不击穿前缀缓存；Worker 可一次拉齐实体与避坑经验，且插件零 `ds-bot` 依赖 |
+| **后续（最后实现）** | 写入安全加固（暂不纳入 M4/M5） | 写入侧记忆投毒 / 提示注入拦截（规则/分类检测“忽略规则”等篡改指令并强制降级）与红队用例验收（当前仅作设计登记，待 M4/M5 后最后实施） | 红队记忆投毒用例写入阻断或降级隔离，误报不干扰正常偏好与工作规则记录 |
 
 ### 5.2 本地开发与红线约束
 
 - **运行时环境**：Windows 11 + Node.js `v24.9.0`（直接复用内置 `node:sqlite`，零原生 C++ 编译依赖）+ pnpm `12.3.4` + 全局 `dsh` CLI `0.2.2-rc.5`。
-- **本地联调方式**：通过 `dsh plugin --profile bot-dev add link:D:/project/dsh-plguin/dsh-memory` 挂载到独立调试 Profile `bot-dev`（端口 `3085`），配合在 `bot-dev/cordis.patch.yml` 为 `ds-bot` 设置 `memory: false` 避免双记忆冲突。
+- **本地联调方式**：通过 `dsh plugin --profile bot-dev add link:D:/project/dsh-plguin/dsh-memory` 挂载到独立调试 Profile `bot-dev`（端口 `3085`），配合在 `bot-dev/cordis.patch.yml` 为 `ds-bot` 设置 `memory: false`（并在 `dsh-ctrl` 侧停用 `ds-bot` 原生 `learning.js`）避免双记忆与双后台抽取冲突。
 - **三条绝对红线**：
   1. 严禁修改 `node_modules/@deepseek-ai/dsh` 核心源码；
   2. 严禁在 `` `$DSH_HOME/cordis.patch.yml` ``（home patch）写入 `llm-pi-ai` 或 `agent-default-model`；

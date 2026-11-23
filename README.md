@@ -4,11 +4,11 @@
 
 ## 项目定位
 
-- **纯记忆系统**：只负责“人、事、偏好、决定、纠偏教训与时间轴”，不耦合 Ticket 任务进度、工作群或实施者调度。
+- **纯记忆系统**：只负责“人、事、偏好、决定、纠偏与避坑教训（程序性记忆，M5）及时间轴”，不耦合 Ticket 任务进度、工作群编排或可执行技能包（`SKILL.md` / MCP / 工具权限挂载）。
 - **主存储与派生索引分层（零向量）**：`PROFILE.md`、`buffer/`、`journals/`、`entities/` 与 `archive.sqlite` 的 `messages` 原文表共同构成**主存储（须纳入备份）**；FTS5 `trigram` 虚表、按 `(session, logical_date)` 冻结的 `snapshots/` 与 M2 `history/` 索引为可重建派生层，**不引入外部向量数据库**。
 - **时间框架为主轴 + 缓存友好**：采用“核心画像 + 昨日完整日报 + 近 N 天日报精华 + 历史总览（M2）”的按 `(session_id, logical_date)` 冻结前缀结构；盘中新增记忆与纠偏一律先写入按日轮转的追加式缓冲区（`buffer/YYYY-MM-DD.jsonl`），通过 `agent/pre-step` 持久化动态增量（Compaction 后自动重置游标）注入，既保护 Prompt Prefix Cache 又防止压缩失忆。
 - **精细隔离与可控遗忘**：子会话默认仅保留用户本人直接发言（`subagentPolicy: 'user-only'`），提供三态无痕模式（`full` / `read-only` / `off`）与主动遗忘工具 `memory_forget`。
-- **独立可插拔**：严格基于 `@deepseek-ai/dsh` 与 `@deepseek-ai/cordis` 公开插件 API 开发，可独立运行于原版 DSH，也可配合 `ds-bot`（配置 `memory: false`）使用。
+- **独立可插拔**：严格基于 `@deepseek-ai/dsh` 与 `@deepseek-ai/cordis` 公开插件 API 开发，可独立运行于原版 DSH，也可配合 `ds-bot`（配置 `memory: false`，并建议在 `dsh-ctrl` 停用 `ds-bot` 原生 `learning.js` 以免双后台抽取烧 Token 冲突）使用。
 
 ## 核心能力规划
 
@@ -18,6 +18,7 @@
 | **M2** | ✅ 已完成 | 历史记忆层引入 OpenViking L0/L1/L2 渐进披露（无向量单跳派生、`memory_history_browse`）与总览注入；`entities/` 实体档案卡、`target: entity:<名称>` 结算、别名精准触发动态注入与 `memory_entity_manage` |
 | **M3** | ✅ 已完成 | 初始画像冷启动引导（空画像首次加载触发、多端自适应 `show_view` / `ask_user` / `ask_user_question` / 文本问卷、跳过与重填、Prefix Cache 保护）、每日晨报确认体验（昨日亮点 + 批量 `approve`/`reject` + `settleNow`）、轻量纠偏捕获（`source_type: 'correction'` + 真实用户锚点），以及公开 Cordis 服务 `dshMemory` 与标准事件 `dsh-memory/day-rolled-over` |
 | **M4** | ✅ 已完成 | 规则 + LLM 双通道 Dream（无证据不误删、冲突保留 `CONFLICT`、失败不推进水位、`expires` 提案与 `retired.jsonl` 通用回滚）、`memory_read_context` 行窗口邻接扩展、`guard.js` 幂等去重与凭据“只记名不记值”拒写、`memory_forget` 补清 `PROFILE.md`/`retired.jsonl`，以及离线单测 + 在线准确率/Token 消融评测 |
+| **M5** | 📋 规划中 | 避坑经验与程序性记忆（`lessons/*.md`、`target: 'lesson:<名称>'`、标签/触发词动态召回、`memory_lesson_manage`，`dshMemory` 新增 `matchLessons`/`getLesson`/`listLessons` 供 Worker 与原版 DSH 复用；可执行 `SKILL.md`/MCP 留在执行层，搭配 `ds-bot` 停用 `learning.js`） |
 | **后续（最后实现）** | 📝 已记录 | 写入侧记忆投毒 / 提示注入拦截与红队验收（当前由数据区声明与缓冲确认兜底，最后实现） |
 
 ## 架构目录规划（运行时数据，默认 `$DSH_HOME/daily-memory/`）
@@ -28,6 +29,7 @@
 ├── buffer/YYYY-MM-DD.jsonl              # [主存储] 按日轮转追加式缓冲区（显式记忆 / 纠偏 / 提案）
 ├── journals/                            # [主存储] 不可变每日日报（YYYY-MM-DD.md）
 ├── entities/                            # [主存储 · M2/M3] 实体档案卡（别名触发动态增量注入）
+├── lessons/                             # [主存储 · M5] 避坑经验/操作雷区卡（标签/触发词动态召回）
 ├── history/                             # [派生 · M2] OpenViking L0/L1 历史总览索引
 ├── snapshots/                           # [派生] 按 (session_id, logical_date) 冻结的前缀快照
 ├── retired.jsonl                        # [主存储 · M4] 被取代/归档条目备份（可回滚）
