@@ -91,6 +91,7 @@ export function checkDuplicateContent({
   op = 'add',
   bufferItems = [],
   profileEntries = [],
+  lessonEntries = [],
 } = {}) {
   const contentHash = computeContentHash(content)
   if ((op ?? 'add') !== 'add' || !contentHash) {
@@ -121,6 +122,21 @@ export function checkDuplicateContent({
         return {
           duplicate: true,
           duplicateIn: 'profile',
+          existingId: entry.id,
+          existingEntry: entry,
+          contentHash,
+        }
+      }
+    }
+  }
+
+  if (typeof target === 'string' && target.startsWith('lesson:')) {
+    for (const entry of lessonEntries) {
+      if (entry.rawOnly) continue
+      if (computeContentHash(entry.content) === contentHash) {
+        return {
+          duplicate: true,
+          duplicateIn: 'lesson',
           existingId: entry.id,
           existingEntry: entry,
           contentHash,

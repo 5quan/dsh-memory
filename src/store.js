@@ -3,7 +3,7 @@ import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { parseAnchor } from './util.js'
 
-const SCHEMA_VERSION = 2
+const SCHEMA_VERSION = 3
 
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS messages (
@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS session_state (
   replace_generation INTEGER NOT NULL DEFAULT 0,
   buffer_cursor TEXT,
   injected_entities TEXT NOT NULL DEFAULT '[]',
+  injected_lessons TEXT NOT NULL DEFAULT '[]',
   updated_at INTEGER NOT NULL
 );
 
@@ -79,21 +80,21 @@ CREATE TABLE IF NOT EXISTS memory_meta (
   value TEXT NOT NULL,
   updated_at INTEGER NOT NULL
 );
-
-PRAGMA user_version = ${SCHEMA_VERSION};
 `
 
 const likeEscape = term => `%${String(term).replace(/[\\%_]/g, char => `\\${char}`)}%`
 
+function parseJsonStringArray(raw) {
+  try {
+    const parsed = JSON.parse(raw || '[]')
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
 function normalizeSessionRow(row) {
   if (!row) return undefined
-  let injectedEntities = []
-  try {
-    const parsed = JSON.parse(row.injected_entities || '[]')
-    if (Array.isArray(parsed)) injectedEntities = parsed
-  } catch {
-    injectedEntities = []
-  }
   return {
     sessionId: row.session_id,
     scope: row.scope,
@@ -102,7 +103,8 @@ function normalizeSessionRow(row) {
     lastSeq: row.last_seq,
     replaceGeneration: row.replace_generation,
     bufferCursor: row.buffer_cursor ?? null,
-    injectedEntities,
+    injectedEntities: parseJsonStringArray(row.injected_entities),
+    injectedLessons: parseJsonStringArray(row.injected_lessons),
     updatedAt: row.updated_at,
   }
 }
@@ -118,6 +120,11 @@ export function createMemoryStore(dbPath) {
   const currentVersion = db.prepare('PRAGMA user_version').get().user_version
   if (currentVersion < SCHEMA_VERSION) {
     db.exec(SCHEMA_SQL)
+    const sessionCols = new Set(db.prepare("PRAGMA table_info('session_state')").all().map(col => col.name))
+    if (!sessionCols.has('injected_lessons')) {
+      db.exec("ALTER TABLE session_state ADD COLUMN injected_lessons TEXT NOT NULL DEFAULT '[]';")
+    }
+    db.exec(`PRAGMA user_version = ${SCHEMA_VERSION};`)
   }
 
   const stmtInsertMessage = db.prepare(`
@@ -174,8 +181,8 @@ export function createMemoryStore(dbPath) {
   const stmtGetSession = db.prepare('SELECT * FROM session_state WHERE session_id = ?')
   const stmtUpsertSession = db.prepare(`
     INSERT INTO session_state
-      (session_id, scope, parent_session_id, memory_mode, last_seq, replace_generation, buffer_cursor, injected_entities, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (session_id, scope, parent_session_id, memory_mode, last_seq, replace_generation, buffer_cursor, injected_entities, injected_lessons, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(session_id) DO UPDATE SET
       scope = excluded.scope,
       parent_session_id = excluded.parent_session_id,
@@ -184,6 +191,7 @@ export function createMemoryStore(dbPath) {
       replace_generation = excluded.replace_generation,
       buffer_cursor = excluded.buffer_cursor,
       injected_entities = excluded.injected_entities,
+      injected_lessons = excluded.injected_lessons,
       updated_at = excluded.updated_at
   `)
   const stmtGetRollover = db.prepare('SELECT * FROM rollover_state WHERE logical_date = ? AND scope = ?')
@@ -459,6 +467,9 @@ export function createMemoryStore(dbPath) {
       injectedEntities: patch.injectedEntities !== undefined
         ? patch.injectedEntities
         : (prev?.injectedEntities ?? []),
+      injectedLessons: patch.injectedLessons !== undefined
+        ? patch.injectedLessons
+        : (prev?.injectedLessons ?? []),
       updatedAt: patch.updatedAt ?? Date.now(),
     }
     stmtUpsertSession.run(
@@ -470,6 +481,7 @@ export function createMemoryStore(dbPath) {
       next.replaceGeneration,
       next.bufferCursor,
       JSON.stringify(next.injectedEntities),
+      JSON.stringify(next.injectedLessons),
       next.updatedAt,
     )
     return { sessionId, ...next }
@@ -485,6 +497,7 @@ export function createMemoryStore(dbPath) {
       replaceGeneration,
       bufferCursor: null,
       injectedEntities: [],
+      injectedLessons: [],
       updatedAt,
     })
   }

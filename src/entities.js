@@ -1,33 +1,21 @@
 import { readdirSync, readFileSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { formatProfileMeta, parseMetaParts } from './profile.js'
-import { atomicWriteFile, safeId } from './util.js'
+import { atomicWriteFile, mergeUniqueTerms, slugifyName, triggerMatchIndex } from './util.js'
 
 export const ENTITIES_DIR = 'entities'
 const META_RE = /\s*`\[([^\]]+)\]`\s*$/
-const WIN_RESERVED_RE = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i
-const ASCII_TRIGGER_RE = /^[a-z0-9_.\- ]+$/i
 
 export function entitiesDir(home) {
   return join(home, ENTITIES_DIR)
 }
 
 export function entitySlug(name) {
-  const cleaned = String(name ?? '')
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9\u3400-\u9FFF\uF900-\uFAFF-]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-  if (cleaned === '' || cleaned.length > 80) return safeId(name)
-  return WIN_RESERVED_RE.test(cleaned) ? `ent-${cleaned}` : cleaned
+  return slugifyName(name, 'ent')
 }
 
 export function entityPath(home, slug) {
   return join(entitiesDir(home), `${slug}.md`)
-}
-
-function escapeRegExp(str) {
-  return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 export function parseEntityMarkdown(raw, slug) {
@@ -177,15 +165,7 @@ export async function upsertEntity(home, options) {
     entity.type = options.type.trim()
   }
   if (Array.isArray(options.aliases)) {
-    const merged = [...entity.aliases]
-    const seen = new Set(merged.map(a => a.toLowerCase()))
-    for (const rawAlias of options.aliases) {
-      const alias = String(rawAlias ?? '').trim()
-      if (!alias || seen.has(alias.toLowerCase())) continue
-      seen.add(alias.toLowerCase())
-      merged.push(alias)
-    }
-    entity.aliases = merged
+    entity.aliases = mergeUniqueTerms(entity.aliases, options.aliases)
   }
 
   const op = options.op ?? 'add'
@@ -251,17 +231,6 @@ export async function deleteEntity(home, nameOrSlug, { force = false } = {}) {
     if (error?.code !== 'ENOENT') throw error
   }
   return { ok: true, slug: entity.slug }
-}
-
-function triggerMatchIndex(trigger, text, lowerText) {
-  const clean = String(trigger ?? '').trim()
-  if ([...clean].length < 2) return -1
-  if (ASCII_TRIGGER_RE.test(clean)) {
-    const re = new RegExp(`(?<![a-z0-9_])${escapeRegExp(clean)}(?![a-z0-9_])`, 'i')
-    const m = re.exec(text)
-    return m ? m.index : -1
-  }
-  return lowerText.indexOf(clean.toLowerCase())
 }
 
 export function matchEntitiesInText(home, text) {

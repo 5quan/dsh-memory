@@ -11,6 +11,7 @@ export function createPublicService({
   store,
   bufferApi,
   entityApi,
+  lessonApi,
   briefingApi,
   onboardingApi,
   clock = { now: () => Date.now() },
@@ -34,22 +35,39 @@ export function createPublicService({
     return await briefingApi.confirmItems(options)
   }
 
-  function matchEntities(text, { maxTokens = config.sections.entities.maxTokens } = {}) {
-    if (!entityApi) {
-      return { matches: [], text: '', totalMatched: 0 }
-    }
-    const rawHits = entityApi.matchEntitiesInText(config.home, text)
+  function packMatchedCards(rawHits, { maxTokens, formatCard, toMatch }) {
     const kept = []
     const blocks = []
     let usedTokens = 0
 
     for (const hit of rawHits) {
-      const cardText = entityApi.formatEntityCardForPrompt(hit.entity)
+      const cardText = formatCard(hit)
       const cost = estimateTokens(cardText)
       if (maxTokens > 0 && usedTokens + cost > maxTokens && kept.length > 0) {
         continue
       }
-      kept.push({
+      kept.push(toMatch(hit, cardText))
+      blocks.push(cardText)
+      usedTokens += cost
+    }
+
+    return {
+      totalMatched: rawHits.length,
+      matches: kept,
+      text: blocks.join('\n\n'),
+      estimatedTokens: usedTokens,
+    }
+  }
+
+  function matchEntities(text, { maxTokens = config.sections.entities.maxTokens } = {}) {
+    if (!entityApi) {
+      return { matches: [], text: '', totalMatched: 0, estimatedTokens: 0 }
+    }
+    const rawHits = entityApi.matchEntitiesInText(config.home, text)
+    return packMatchedCards(rawHits, {
+      maxTokens,
+      formatCard: hit => entityApi.formatEntityCardForPrompt(hit.entity),
+      toMatch: (hit, cardText) => ({
         slug: hit.entity.slug,
         name: hit.entity.name,
         type: hit.entity.type,
@@ -64,17 +82,8 @@ export function createPublicService({
           pinned: f.pinned === true,
         })),
         cardText,
-      })
-      blocks.push(cardText)
-      usedTokens += cost
-    }
-
-    return {
-      totalMatched: rawHits.length,
-      matches: kept,
-      text: blocks.join('\n\n'),
-      estimatedTokens: usedTokens,
-    }
+      }),
+    })
   }
 
   function getEntity(nameOrSlug) {
@@ -85,6 +94,45 @@ export function createPublicService({
     return entityApi ? entityApi.listEntities(config.home) : []
   }
 
+  function matchLessons(text = '', { tags = [], maxTokens = config.sections.lessons?.maxTokens ?? 1500 } = {}) {
+    if (!lessonApi) {
+      return { matches: [], text: '', totalMatched: 0, estimatedTokens: 0 }
+    }
+    const rawHits = lessonApi.matchLessonsInText(config.home, text, { tags })
+    return packMatchedCards(rawHits, {
+      maxTokens,
+      formatCard: hit => lessonApi.formatLessonCardForPrompt(hit.lesson),
+      toMatch: (hit, cardText) => ({
+        slug: hit.lesson.slug,
+        name: hit.lesson.name,
+        tags: [...hit.lesson.tags],
+        triggers: [...hit.lesson.triggers],
+        matchedTrigger: hit.matchedTrigger,
+        matchIndex: hit.matchIndex,
+        matchedTags: [...hit.matchedTags],
+        entries: hit.lesson.entries
+          .filter(e => !e.rawOnly)
+          .map(e => ({
+            id: e.id,
+            content: e.content,
+            added: e.added,
+            source: e.source,
+            ...(e.expires ? { expires: e.expires } : {}),
+            pinned: e.pinned === true,
+          })),
+        cardText,
+      }),
+    })
+  }
+
+  function getLesson(nameOrSlug) {
+    return lessonApi?.readLesson(config.home, nameOrSlug)
+  }
+
+  function listLessons() {
+    return lessonApi ? lessonApi.listLessons(config.home) : []
+  }
+
   async function submitBufferCandidate(input = {}) {
     const content = String(input.content ?? '').trim()
     if (content === '') {
@@ -92,7 +140,12 @@ export function createPublicService({
     }
 
     const target = input.target ?? 'profile'
-    const validTarget = target === 'profile' || target === 'note' || (typeof target === 'string' && target.startsWith('entity:') && target.length > 7)
+    const validTarget = (
+      target === 'profile'
+      || target === 'note'
+      || (typeof target === 'string' && target.startsWith('entity:') && target.slice('entity:'.length).trim().length > 0)
+      || (typeof target === 'string' && target.startsWith('lesson:') && target.slice('lesson:'.length).trim().length > 0)
+    )
     if (!validTarget) {
       return { ok: false, reason: 'INVALID_TARGET', target }
     }
@@ -128,6 +181,8 @@ export function createPublicService({
         supersedesId: input.supersedesId ?? null,
         anchor: candidateAnchor,
         pinned: input.pinned === true && !downgraded,
+        ...(Array.isArray(input.tags) ? { tags: input.tags } : {}),
+        ...(Array.isArray(input.triggers) ? { triggers: input.triggers } : {}),
         ...(typeof input.expires === 'string' && input.expires.trim() !== '' ? { expires: input.expires.trim() } : {}),
         producer: typeof input.producer === 'string' && input.producer.trim() !== '' ? input.producer.trim() : 'external-service',
       })
@@ -182,6 +237,9 @@ export function createPublicService({
     matchEntities,
     getEntity,
     listEntities,
+    matchLessons,
+    getLesson,
+    listLessons,
     submitBufferCandidate,
     getOnboardingState,
     submitOnboarding,

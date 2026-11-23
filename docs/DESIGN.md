@@ -1,6 +1,6 @@
 # `dsh-memory` 架构设计说明书
 
-> 状态：M1、M2（`#1`）、M3（`#2`：冷启动引导、每日晨报确认、轻量纠偏与公开 Cordis 服务契约）、M4（`#5`：Dream 后台巩固、`retired.jsonl` 通用回滚、行窗口邻接上下文、写入守卫与 `memory_forget` 8 层收尾）已完成  
+> 状态：M1、M2（`#1`）、M3（`#2`：冷启动引导、每日晨报确认、轻量纠偏与公开 Cordis 服务契约）、M4（`#5`：Dream 后台巩固、`retired.jsonl` 通用回滚、行窗口邻接上下文、写入守卫与 `memory_forget` 8 层收尾）、M5（`#7`：`lessons/` 避坑经验与程序性记忆）已完成  
 > 仓库：`5quan/dsh-memory`  
 > 参考来源：DeepSeek Super-agent 设计探索（`https://zhuanlan.zhihu.com/p/2099987320443237060`）、`dsh-ctrl` 记忆体系前期探索、OpenViking L0/L1/L2 渐进披露范式、AutoDream 后台整理思想、Anthropic *The components of agent memory* / Dreaming & Knowledge Wiki 实践、MemMachine 邻接原文扩展思想
 
@@ -486,7 +486,7 @@ stateDiagram-v2
 | `session.surface.replaceGeneration` | `readonly number`（随替换/Compaction 单调递增） | 在 `agent/pre-step` 中比对是否发生 Compaction，触发游标重置 |
 | `ctx.systemPrompt.section(...)` | `{ name, order, interpolate: false, text: (context: AssembleContext) => string }` | 按 `(context.agent?.id, logicalDate)` 读取/生成冻结前缀快照 |
 | `ctx.on('agent/pre-step', ...)` | `async ({ agent, messages, turn, step, signal, modelSelection }, next) => PreStepDecision` | 调用 `await next()` 后在 `decision.kind === 'enter'` 时持久化前置动态增量消息 |
-| `ctx.tools.register(defineTool(...))` | 来自 `@deepseek-ai/dsh-tools` | 注册面向模型的 14 个 M1–M4 记忆工具 |
+| `ctx.tools.register(defineTool(...))` | 来自 `@deepseek-ai/dsh-tools` | 注册面向模型的 15 个 M1–M5 记忆工具 |
 | `ctx.tools.get(name, scope?)` | `@deepseek-ai/dsh-tools` 返回当前作用域可见工具定义 | 在 `agent/pre-step` 中零耦合探测宿主交互能力（`show_view` / `ask_user` / `ask_user_question`） |
 | `ctx.userQuestions?.ask(...)` | `@deepseek-ai/dsh-user-questions` 可选交互服务 | 原版 DSH 中驱动冷启动问卷与晨报多选确认弹窗（无此服务时优雅降级） |
 | `ctx.provide('dshMemory', service)` | `@deepseek-ai/cordis` 服务注册（`apply` 不返回非 Effect 对象） | 向外部插件/上层 Bot 暴露只读查询与缓冲中转服务契约 |
@@ -533,6 +533,8 @@ export function apply(ctx, config = {}) {
 | `sections.historyOverview.maxTokens` | `number` | `1000` | 历史总览（M2）token 预算上限 |
 | `sections.entities.enabled` | `boolean` | `true` | **[M2/M3 预留]** 是否启用实体档案动态触发注入 |
 | `sections.entities.maxTokens` | `number` | `1500` | **[M2/M3 预留]** 单轮实体增量注入 token 上限 |
+| `sections.lessons.enabled` | `boolean` | `true` | 是否启用 `lessons/` 避坑经验卡动态触发注入 |
+| `sections.lessons.maxTokens` | `number` | `1500` | 单轮避坑经验增量注入 token 上限 |
 | `buffer.autoCommitSources` | `string[]` | `['explicit']` | 日终允许自动落盘进 `PROFILE.md` 的缓冲区来源类型（须通过 `anchor` 校验） |
 | `buffer.requireConfirmOnOverwrite` | `boolean` | `true` | 覆盖/删除现有画像或 `pinned` 条目是否强制人工确认 |
 | `onboarding.enabled` | `boolean` | `true` | 是否在空画像首次进入正常会话时自动触发冷启动引导 |

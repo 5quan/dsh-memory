@@ -4,6 +4,7 @@ import { createMemoryStore } from './src/store.js'
 import * as profileApi from './src/profile.js'
 import * as journalApi from './src/journal.js'
 import * as entityApi from './src/entities.js'
+import * as lessonApi from './src/lessons.js'
 import { createBufferApi } from './src/buffer.js'
 import { createHistoryApi } from './src/history.js'
 import { createDigestApi } from './src/digest.js'
@@ -31,7 +32,7 @@ export function createMemoryRuntime(ctx, rawConfig = {}, deps = {}) {
   const store = createMemoryStore(join(config.home, 'archive.sqlite'))
   ctx.effect(() => () => store.close(), 'dsh-memory: close archive.sqlite')
 
-  const bufferApi = createBufferApi({ home: config.home, profileApi, clock })
+  const bufferApi = createBufferApi({ home: config.home, profileApi, lessonApi, clock })
   const historyApi = createHistoryApi({
     ctx,
     config,
@@ -47,6 +48,7 @@ export function createMemoryRuntime(ctx, rawConfig = {}, deps = {}) {
     journalApi,
     bufferApi,
     entityApi,
+    lessonApi,
     historyApi,
     clock,
     warn,
@@ -59,6 +61,7 @@ export function createMemoryRuntime(ctx, rawConfig = {}, deps = {}) {
     profileApi,
     journalApi,
     entityApi,
+    lessonApi,
     historyApi,
     clock,
     warn,
@@ -90,6 +93,7 @@ export function createMemoryRuntime(ctx, rawConfig = {}, deps = {}) {
     bufferApi,
     profileApi,
     entityApi,
+    lessonApi,
     contextApi: snapshotFacade,
     clock,
   })
@@ -102,6 +106,7 @@ export function createMemoryRuntime(ctx, rawConfig = {}, deps = {}) {
     journalApi,
     bufferApi,
     entityApi,
+    lessonApi,
     onboardingApi,
     briefingApi,
     clock,
@@ -139,6 +144,7 @@ export function createMemoryRuntime(ctx, rawConfig = {}, deps = {}) {
     contextApi,
     historyApi,
     entityApi,
+    lessonApi,
     onboardingApi,
     briefingApi,
     profileApi,
@@ -150,6 +156,7 @@ export function createMemoryRuntime(ctx, rawConfig = {}, deps = {}) {
     store,
     bufferApi,
     entityApi,
+    lessonApi,
     briefingApi,
     onboardingApi,
     clock,
@@ -184,6 +191,7 @@ export function createMemoryRuntime(ctx, rawConfig = {}, deps = {}) {
     profileApi,
     journalApi,
     entityApi,
+    lessonApi,
     historyApi,
     bufferApi,
     digestApi,

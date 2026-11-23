@@ -95,6 +95,7 @@ export function createBriefingApi({
   bufferApi,
   profileApi,
   entityApi,
+  lessonApi,
   contextApi,
   clock = { now: () => Date.now() },
 }) {
@@ -232,6 +233,7 @@ export function createBriefingApi({
         store,
         profileApi,
         entityApi,
+        lessonApi,
         config,
       })
       if (settlement.profile.committed.length > 0) {
