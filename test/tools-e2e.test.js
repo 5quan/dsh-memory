@@ -168,6 +168,7 @@ test('E2E workflow across all 9 M1+M2 tools including buffer, digest, history, e
     reason: '用户确认通过',
   })
   assert.equal(approvedMsg.includes('approved'), true)
+  assert.equal(approvedMsg.includes('daily rollover') && approvedMsg.includes('memory_digest_now'), true)
 
   // Advance clock to next logical day (2026-11-22) and run manual digest for yesterday (2026-11-21)
   nowMs = Date.parse('2026-11-22T10:00:00+08:00')
@@ -197,13 +198,24 @@ test('E2E workflow across all 9 M1+M2 tools including buffer, digest, history, e
   const entList = await runTool('memory_entity_manage', { action: 'list' })
   assert.equal(entList.includes('测试服务器'), true)
 
-  // 4. Search archive + journal
+  // 4. Search archive + journal (exact, multi-term OR fallback, and date browse without query)
   const searchOut = await runTool('memory_search', { query: 'TempSecretToken' })
   assert.equal(searchOut.includes('Journal Matches'), true)
   assert.equal(searchOut.includes('Archive Matches'), true)
 
+  const fallbackSearchOut = await runTool('memory_search', { query: 'TempSecretToken 不存在的词' })
+  assert.equal(fallbackSearchOut.includes('Journal Matches'), true)
+  assert.equal(fallbackSearchOut.includes('Archive Matches'), true)
+
+  const browseByDateOut = await runTool('memory_search', { dateFrom: '2026-11-21', dateTo: '2026-11-21' })
+  assert.equal(browseByDateOut.includes('Archive Matches'), true)
+  assert.equal(browseByDateOut.includes('chat://2026-11-21#main#2'), true)
+  const browseDefaultOut = await runTool('memory_search', {})
+  assert.equal(browseDefaultOut.includes('Archive Matches'), true)
+
   // 5. Forget TempSecretToken -> deletes archive + redacts journal, entity, and history + invalidates snapshot
-  rt.contextApi.sectionFor('main')
+  const snapshotText = rt.contextApi.sectionFor('main')
+  assert.equal(snapshotText.includes('严禁使用 shell/文件工具'), true)
   const forgetOut = await runTool('memory_forget', { keyword: 'TempSecretToken' })
   assert.equal(forgetOut.includes('Forgot 1 archived message(s)'), true)
   assert.equal(forgetOut.includes('Redacted 1 daily journal(s): 2026-11-21'), true)

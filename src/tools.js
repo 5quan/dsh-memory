@@ -26,9 +26,9 @@ export function createToolsApi({ ctx, config, store, bufferApi, journalApi, dige
   const tools = [
     defineTool({
       name: 'memory_search',
-      description: 'Search historical conversation transcripts (FTS5 trigram + LIKE) and daily journals by keyword or date range. Returns snippets with exact chat:// anchors.',
+      description: 'Search historical conversation transcripts (FTS5 trigram + LIKE, with multi-term OR fallback ranked by coverage) and daily journals by keyword or date range. Omit query to browse recent archived messages by date range. Returns snippets with exact chat:// anchors.',
       parameters: {
-        query: { type: 'string', required: true, description: 'Keywords or phrase to search.' },
+        query: { type: 'string', description: 'Optional keywords or phrase to search. Omit to browse recent archived messages in the date range (defaults up to today).' },
         dateFrom: { type: 'string', description: 'Optional inclusive start date (YYYY-MM-DD).' },
         dateTo: { type: 'string', description: 'Optional inclusive end date (YYYY-MM-DD).' },
         scope: { type: 'string', description: 'Optional memory scope (default "default").' },
@@ -43,22 +43,33 @@ export function createToolsApi({ ctx, config, store, bufferApi, journalApi, dige
         }
         const scope = args.scope?.trim() || sessionScopeOf(sessionId)
         const limit = Math.min(Math.max(args.limit ?? 10, 1), 50)
+        const rawQuery = typeof args.query === 'string' ? args.query.trim() : ''
+        const dateFrom = args.dateFrom?.trim() || undefined
+        let dateTo = args.dateTo?.trim() || undefined
+        if (!rawQuery && !dateFrom && !dateTo) {
+          dateTo = currentLogicalDate()
+        }
+
         const msgHits = store.searchMessages({
-          query: args.query,
-          dateFrom: args.dateFrom,
-          dateTo: args.dateTo,
+          query: rawQuery,
+          dateFrom,
+          dateTo,
           scope,
           limit,
         })
-        const journalHits = journalApi.searchJournals(config.home, {
-          query: args.query,
-          dateFrom: args.dateFrom,
-          dateTo: args.dateTo,
-          limit,
-        })
+        const journalHits = rawQuery
+          ? journalApi.searchJournals(config.home, {
+            query: rawQuery,
+            dateFrom,
+            dateTo,
+            limit,
+          })
+          : []
 
         if (msgHits.length === 0 && journalHits.length === 0) {
-          return `No memory matches found for "${args.query}".`
+          return rawQuery
+            ? `No memory matches found for "${rawQuery}".`
+            : 'No archived messages found for the specified date range.'
         }
 
         const sections = []
@@ -156,7 +167,7 @@ export function createToolsApi({ ctx, config, store, bufferApi, journalApi, dige
 
     defineTool({
       name: 'memory_buffer_manage',
-      description: 'List, approve, or reject pending items in the daily memory buffer so the user can review and choose what gets committed.',
+      description: 'List, approve, or reject pending items in the daily memory buffer so the user can review and choose what gets committed. Note: "approve" marks items ready for settlement at daily rollover (preserving today\'s frozen prefix cache); it does NOT immediately rewrite PROFILE.md unless memory_digest_now is run.',
       parameters: {
         action: { type: 'string', enum: ['list', 'approve', 'reject'], required: true, description: 'Action to run on buffer items.' },
         ids: { type: 'array', items: { type: 'string' }, description: 'Buffer item IDs for approve/reject.' },
@@ -192,6 +203,9 @@ export function createToolsApi({ ctx, config, store, bufferApi, journalApi, dige
         })
         if (updated.length === 0) {
           return 'No matching buffer items found.'
+        }
+        if (nextStatus === 'approved') {
+          return `Updated ${updated.length} buffer item(s) to "approved": ${updated.join(', ')}. They will be settled into PROFILE.md/entities during daily rollover (or run memory_digest_now with today's date if immediate settlement is explicitly requested).`
         }
         return `Updated ${updated.length} buffer item(s) to "${nextStatus}": ${updated.join(', ')}`
       },

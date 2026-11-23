@@ -214,13 +214,22 @@ export async function redactJournalForForget(home, { date, anchors = [], keyword
 }
 
 export function searchJournals(home, { query = '', dateFrom, dateTo, limit = 10 } = {}) {
-  const terms = String(query ?? '').trim().toLowerCase().split(/\s+/).filter(Boolean)
+  const seen = new Set()
+  const terms = []
+  for (const raw of String(query ?? '').trim().toLowerCase().split(/\s+/)) {
+    if (!raw || seen.has(raw)) continue
+    seen.add(raw)
+    terms.push(raw)
+  }
   if (terms.length === 0) return []
+  const termEntries = terms.map(term => ({ term, len: [...term].length }))
   const dates = listJournalDates(home)
     .filter(date => (!dateFrom || date >= dateFrom) && (!dateTo || date <= dateTo))
     .reverse()
 
-  const hits = []
+  const andHits = []
+  const orHits = []
+
   for (const date of dates) {
     const raw = readJournal(home, date)
     if (!raw) continue
@@ -231,16 +240,40 @@ export function searchJournals(home, { query = '', dateFrom, dateTo, limit = 10 
         currentSection = h2[1].trim()
         continue
       }
+      if (/^#{1,6}\s/.test(line) || line.trim() === '') continue
       const lower = line.toLowerCase()
-      if (terms.every(term => lower.includes(term))) {
-        hits.push({
-          date,
-          section: currentSection,
-          line: clipText(line.trim(), 300),
-        })
-        if (hits.length >= limit) return hits
+      let matchedCount = 0
+      let matchedChars = 0
+      for (const entry of termEntries) {
+        if (lower.includes(entry.term)) {
+          matchedCount += 1
+          matchedChars += entry.len
+        }
+      }
+      if (matchedCount === 0) continue
+
+      const hit = {
+        date,
+        section: currentSection,
+        line: clipText(line.trim(), 300),
+      }
+      if (matchedCount === termEntries.length) {
+        andHits.push(hit)
+        if (andHits.length >= limit) return andHits
+      } else if (termEntries.length > 1) {
+        orHits.push({ hit, matchedCount, matchedChars })
       }
     }
   }
-  return hits
+
+  if (andHits.length > 0 || termEntries.length <= 1) {
+    return andHits.slice(0, limit)
+  }
+
+  orHits.sort((a, b) =>
+    b.matchedCount - a.matchedCount ||
+    b.matchedChars - a.matchedChars ||
+    b.hit.date.localeCompare(a.hit.date))
+
+  return orHits.slice(0, limit).map(item => item.hit)
 }

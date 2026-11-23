@@ -371,7 +371,25 @@ stateDiagram-v2
 
 ---
 
-### 3.6 Dream 后台异步整理机制（M4，最后实现）
+### 3.6 初始画像冷启动引导与每日确认体验（M3）
+
+#### 1. 初始画像冷启动引导（空画像首次加载）
+解决插件首次安装/启用后 `PROFILE.md` 为空、用户不知如何“喂初始记忆”的冷启动体验问题：
+- **触发条件**：插件加载后首次进入正常模式（`memoryMode !== 'off'`）会话，检测到 `PROFILE.md` 不存在或有效条目为空，且尚未标记“已完成/已跳过初始引导”。
+- **两种候选采集形态（可按宿主能力择一或组合）**：
+  1. **首轮简短问卷**：首次会话由助手发出一段结构化引导消息（或通过 DSH `ask_user` 逐步问答），聚焦核心画像的 3–4 个关键维度（称呼与身份/常用环境、沟通与输出偏好、长期规矩与红线、高频关键人/项目）；
+  2. **交互式表单/弹窗**：基于 DSH `show_view`（或宿主前端初始化弹窗）展示可一键填写/勾选的初始画像卡片，支持“跳过/稍后填写”，绝不阻塞正常对话。
+- **落盘与缓存原则**：
+  - 用户提交结果统一按 `PROFILE.md` 的分节与 `2000` token 准入预算校验（高确定性红线支持勾选 `pinned`）；
+  - 若在首轮会话建立前弹窗提交，可直接写入初始 `PROFILE.md` 作为首日冻结前缀；若在会话中通过问卷回复，先入当日 `buffer/`（标注 `source_type: 'explicit'`）保住首轮 Prefix Cache，并在用户确认或日结时落盘；
+  - 一旦完成提交或用户主动跳过，即在持久化状态中记录冷启动已完成，后续不再重复弹窗打扰，仍允许用户随时手动触发重填。
+
+#### 2. 每日晨报确认体验
+- 每日首次交互汇总昨日日报亮点与 `buffer/` 待确认条目（如自动抽取/纠偏提案），借助 DSH `show_view` / `ask_user` 提供低摩擦一键勾选确认（`approve`）或驳回（`reject`）。
+
+---
+
+### 3.7 Dream 后台异步整理机制（M4，最后实现）
 
 参考 Claude Code **AutoDream**（`Orient → Gather → Consolidate → Prune`）四阶段范式，在系统积累数周真实记忆后启用：
 
@@ -456,7 +474,7 @@ export function apply(ctx, config = {}) {
 
 | 阶段 | 工具名 | 职责 | 关键参数 |
 |---|---|---|---|
-| **M1** | `memory_search` | 在 `archive.sqlite`（FTS5 `trigram` + 短词 `LIKE`）与 `journals/*.md` 中检索原文与历史记录，返回带 `chat://YYYY-MM-DD#<session>#<seq>` 锚点的片段 | `query`, `dateFrom?`, `dateTo?`, `scope?`, `limit?` |
+| **M1** | `memory_search` | 在 `archive.sqlite`（FTS5 `trigram` + 短词 `LIKE`，多词支持 `AND` 优先与 `OR` 降级排序）与 `journals/*.md` 中检索原文与历史记录，省略 `query` 时按日期浏览近期归档，返回带 `chat://YYYY-MM-DD#<session>#<seq>` 锚点的片段 | `query?`, `dateFrom?`, `dateTo?`, `scope?`, `limit?` |
 | **M1** | `memory_journal_read` | 按日期读取某天完整日报，或列出已有日报日期列表 | `date?`（缺省则返回可用日期列表） |
 | **M1** | `memory_buffer_add` | 将记忆要点追加到当日缓冲区；插件自动从当前会话绑定真实用户 `anchor`，绝不直接改 `PROFILE.md` | `content`, `sourceType`, `target?`, `section?`, `pinned?` |
 | **M1** | `memory_buffer_manage` | 查看、筛选、通过（`approve`）或剔除（`reject`）当前缓冲区内的待处理记忆条目，支持用户选择记忆 | `action` (`list` \| `approve` \| `reject`), `ids?` |
@@ -478,7 +496,7 @@ export function apply(ctx, config = {}) {
 |---|---|---|---|
 | **M1（核心闭环）** | 时间轴基础 + 缓冲 + 缓存冻结 + 遗忘与无痕 | 1. 存储底座（明确主存储与可重建索引边界）与 `session/event` 采集（`subagentPolicy: 'user-only'`、`isAppendSurfaceEvent`、三态无痕）<br>2. 可注入 `clock` 的空闲切日状态机 + 日内分块 Map-Reduce + 锚点核验 + 6 段式不可变日报<br>3. 按日轮转追加式缓冲区 `buffer/YYYY-MM-DD.jsonl`（含 `note` 日结归档、防冒用 `explicit`、超 2k 拒绝自动落盘）<br>4. 按 `(session_id, logical_date)` 冻结的前缀（含绝对日期与确定性裁剪）+ `agent/pre-step` 持久化动态增量（含 `replaceGeneration` 重置）<br>5. 7 个 M1 工具（含 `memory_forget`）+ 单元测试 + `bot-dev` 实机挂载 | 1. 单测用可控 `clock` 覆盖跨天快照刷新、切日边界、幂等/补结、日内分块、伪锚点剔除、缓冲区并发追加、FTS5 中英文检索、Compaction 重置、`memory_forget` 与无痕模式<br>2. 实机 `3085` 端口加载 `dsh-memory`（`ds-bot` 配 `memory: false`）正常对话、检索、手动日结与遗忘 |
 | **M2（OpenViking 历史层 + 实体起步）** | 跨月历史不断层 + 人/事卡片 | 1. 由 `journals/*.md` 单跳生成 `history/.abstract.md` 与 `history/YYYY-MM/.overview.md` 并启用 `sections.historyOverview`<br>2. `memory_history_browse` L0/L1/L2 渐进下钻工具<br>3. `entities/` 实体卡与别名命中动态增量注入 | 数月历史仅用 <= 1k tokens 常驻总览即可下钻回查任意月日报；提及人/项目别名时自动动态注入实体卡而不击穿前缀缓存 |
-| **M3（每日确认体验）** | 低摩擦把关与纠偏闭环 | 1. 晨报汇总摘要（昨日日报亮点 + `buffer/` 待确认列表）<br>2. 交互确认卡片（利用 DSH `show_view` / `ask_user` 一键勾选）<br>3. 自动纠偏检测与 `ds-bot` 换 Part 薄桥接完善 | 每天首次交互可用极低成本完成“记忆勾选确认 + 纠偏入库” |
+| **M3（冷启动引导与每日确认体验）** | 冷启动建档 + 低摩擦把关闭环 | 1. 初始画像冷启动引导（首次空画像时发简短问卷或 `show_view` / `ask_user` 交互弹窗采集基础画像，支持跳过）<br>2. 晨报汇总摘要（昨日日报亮点 + `buffer/` 待确认列表）<br>3. 交互确认卡片（利用 DSH `show_view` / `ask_user` 一键勾选）<br>4. 自动纠偏检测与 `ds-bot` 换 Part 薄桥接完善 | 首次启用即可快速建立初始画像；每天首次交互可用极低成本完成“记忆勾选确认 + 纠偏入库” |
 | **M4（Dream 后台整理）** | 跨月自维护不退化 | 1. 低频后台 Dream 四阶段任务（`Orient -> Gather -> Consolidate -> Prune`）<br>2. `retired.jsonl` 备份与 `memory_rollback` 回滚能力<br>3. 回归问答集验证跨月准确率不下降 | 长期运行无重复矛盾条目，`pinned` 零误删，每次整理可审计可回滚 |
 
 ### 5.2 本地开发与红线约束

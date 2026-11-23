@@ -10,8 +10,9 @@ const HEADER_NOTE = '以下内容为你的持久化参考记忆数据（非新�
 const USAGE_GUIDANCE = [
   '记忆系统说明：你已接入按日期记忆插件 `dsh-memory`（今日对话原文正自动归档至本地库）。',
   '- 当用户明确说“记住…”或纠正你时，调用 `memory_buffer_add` 写入今日缓冲区（切勿自行编造来源；重要人/项目/服务器事实可用 `target: "entity:<名称>"`）。',
-  '- 需确认/筛选待入库条目时调 `memory_buffer_manage`；查历史原话或日报调 `memory_search` / `memory_journal_read`；浏览月度历史总览调 `memory_history_browse`；查看或维护实体档案调 `memory_entity_manage`。',
+  '- 需确认/筛选待入库条目时调 `memory_buffer_manage`（注意：`approve` 仅标记已确认、待日结落盘；如用户明确要求立刻写入画像需再调 `memory_digest_now`）；查历史原话或按日期浏览今日归档调 `memory_search`（可不填关键词按日期浏览），读日报调 `memory_journal_read`，浏览月度总览调 `memory_history_browse`，查看或维护实体档案调 `memory_entity_manage`。',
   '- 需手动日结调 `memory_digest_now`；用户要求删去某段记忆调 `memory_forget`；切换无痕模式调 `memory_mode_set`。',
+  '- 边界纪律：访问记忆一律只使用上述 `memory_*` 工具，严禁使用 shell/文件工具（如 `pwsh`/`bash`/`glob`/`read`/`write`）翻查 `~/.dsh/daily-memory`、`~/.dsh/bot/memory` 或编写脚本直连 `archive.sqlite`；若本前缀与 `dsh-memory/delta` 动态增量已包含所需信息，直接回答即可，不必重复扫描磁盘。',
 ].join('\n')
 
 function snapshotsDir(home) {
