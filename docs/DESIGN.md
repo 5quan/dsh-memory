@@ -1,6 +1,6 @@
 # `dsh-memory` 架构设计说明书
 
-> 状态：设计定稿（评审修订完毕，可进入 M1 编码）  
+> 状态：M1 已落地，M2（OpenViking 历史总览与实体档案）已完成（`#1`）  
 > 仓库：`5quan/dsh-memory`  
 > 参考来源：DeepSeek Super-agent 设计探索（`https://zhuanlan.zhihu.com/p/2099987320443237060`）、`dsh-ctrl` 记忆体系前期探索、OpenViking L0/L1/L2 渐进披露范式、AutoDream 后台整理思想
 
@@ -322,8 +322,8 @@ stateDiagram-v2
 - 工具：node:sqlite, FTS5 trigram
 ```
 
-#### 与 `ds-bot` 的解耦桥接
-记忆日结由 `dsh-memory` 独立完成，不依赖 `ds-bot`。日结完成后触发可选事件 `dsh-memory/day-rolled-over`（`{ date }`），有 `ds-bot` 桥接时可通知主 Bot 换新 Part；无 `ds-bot` 时独立运行无任何报错。
+#### 与上层宿主（如 `dsh-ctrl` / `ds-bot`）的单向解耦边界
+`dsh-memory` 作为独立可发布插件，**绝不反向依赖或调用 `ds-bot` 内部实现**。日结完成后触发标准事件 `dsh-memory/day-rolled-over`（`{ date }`），并将在 M3 暴露只读/投递用的公开 Cordis 服务契约；由上层 Bot（如 `dsh-ctrl`）主动绑定消费该事件与服务去完成换新 Part、统一晨报和 Worker 实体检索，无 `ds-bot` 时插件在原版 DSH 独立运行零报错。
 
 ---
 
@@ -371,7 +371,31 @@ stateDiagram-v2
 
 ---
 
-### 3.6 Dream 后台异步整理机制（M4，最后实现）
+### 3.6 初始画像冷启动引导、每日确认体验与对外服务契约（M3）
+
+#### 1. 初始画像冷启动引导（空画像首次加载）
+解决插件首次安装/启用后 `PROFILE.md` 为空、用户不知如何“喂初始记忆”的冷启动体验问题：
+- **触发条件**：插件加载后首次进入正常模式（`memoryMode !== 'off'`）会话，检测到 `PROFILE.md` 不存在或有效条目为空，且尚未标记“已完成/已跳过初始引导”。
+- **两种候选采集形态（可按宿主能力择一或组合）**：
+  1. **首轮简短问卷**：首次会话由助手发出一段结构化引导消息（或通过 DSH `ask_user` 逐步问答），聚焦核心画像的 3–4 个关键维度（称呼与身份/常用环境、沟通与输出偏好、长期规矩与红线、高频关键人/项目）；
+  2. **交互式表单/弹窗**：基于 DSH `show_view`（或宿主前端初始化弹窗）展示可一键填写/勾选的初始画像卡片，支持“跳过/稍后填写”，绝不阻塞正常对话。
+- **落盘与缓存原则**：
+  - 用户提交结果统一按 `PROFILE.md` 的分节与 `2000` token 准入预算校验（高确定性红线支持勾选 `pinned`）；
+  - 若在首轮会话建立前弹窗提交，可直接写入初始 `PROFILE.md` 作为首日冻结前缀；若在会话中通过问卷回复，先入当日 `buffer/`（标注 `source_type: 'explicit'`）保住首轮 Prefix Cache，并在用户确认或日结时落盘；
+  - 一旦完成提交或用户主动跳过，即在持久化状态中记录冷启动已完成，后续不再重复弹窗打扰，仍允许用户随时手动触发重填。
+
+#### 2. 每日晨报确认体验
+- 每日首次交互汇总昨日日报亮点与 `buffer/` 待确认条目（如自动抽取/纠偏提案），借助 DSH `show_view` / `ask_user` 提供低摩擦一键勾选确认（`approve`）或驳回（`reject`）。
+
+#### 3. 公开 Cordis 服务与事件契约（单向解耦，供上层 Bot 绑定）
+- 为支撑 `dsh-memory` 独立发布、`dsh-ctrl`（Bot 侧）主动绑定融合的架构形态，M3 在 Cordis 注册命名公开服务（实现前核对避免与现有 DSH 服务名冲突）并稳定事件格式：
+  1. **生命周期事件**：`dsh-memory/day-rolled-over`（`{ date, scope, journalPath, summary }`），供上层 Bot 在空闲时自行触发换新 Part；
+  2. **查询/投递接口**：获取晨报摘要数据（昨日日报亮点 + `buffer/` 待确认条目）、按文本/别名查询匹配实体卡（供外部 Worker 装配上下文）、向当日缓冲区安全投递候选/复盘记忆（保持统一审核准入，不直写 `PROFILE.md`）。
+- 具体调用 `ds-bot` 换段（`newPart`）与合并 Ticket 晨报的薄胶水代码由 `dsh-ctrl` 侧维护，绝不反向引入 `dsh-memory`。
+
+---
+
+### 3.7 Dream 后台异步整理机制（M4，最后实现）
 
 参考 Claude Code **AutoDream**（`Orient → Gather → Consolidate → Prune`）四阶段范式，在系统积累数周真实记忆后启用：
 
@@ -456,15 +480,15 @@ export function apply(ctx, config = {}) {
 
 | 阶段 | 工具名 | 职责 | 关键参数 |
 |---|---|---|---|
-| **M1** | `memory_search` | 在 `archive.sqlite`（FTS5 `trigram` + 短词 `LIKE`）与 `journals/*.md` 中检索原文与历史记录，返回带 `chat://YYYY-MM-DD#<session>#<seq>` 锚点的片段 | `query`, `dateFrom?`, `dateTo?`, `scope?`, `limit?` |
+| **M1** | `memory_search` | 在 `archive.sqlite`（FTS5 `trigram` + 短词 `LIKE`，多词支持 `AND` 优先与 `OR` 降级排序）与 `journals/*.md` 中检索原文与历史记录，省略 `query` 时按日期浏览近期归档，返回带 `chat://YYYY-MM-DD#<session>#<seq>` 锚点的片段 | `query?`, `dateFrom?`, `dateTo?`, `scope?`, `limit?` |
 | **M1** | `memory_journal_read` | 按日期读取某天完整日报，或列出已有日报日期列表 | `date?`（缺省则返回可用日期列表） |
 | **M1** | `memory_buffer_add` | 将记忆要点追加到当日缓冲区；插件自动从当前会话绑定真实用户 `anchor`，绝不直接改 `PROFILE.md` | `content`, `sourceType`, `target?`, `section?`, `pinned?` |
 | **M1** | `memory_buffer_manage` | 查看、筛选、通过（`approve`）或剔除（`reject`）当前缓冲区内的待处理记忆条目，支持用户选择记忆 | `action` (`list` \| `approve` \| `reject`), `ids?` |
 | **M1** | `memory_mode_set` | 切换当前会话或全局默认的无痕模式（`full` / `read-only` / `off`） | `mode`, `scope?` (`session` \| `global`) |
 | **M1** | `memory_digest_now` | 手动触发指定逻辑日（默认昨天，支持今天预览或显式重建）的日结生成 | `date?`, `force?` |
 | **M1** | `memory_forget` | 按用户要求主动遗忘：物理删除匹配原文与 FTS 索引、作废相关缓冲条目、给对应日报条目打 `[已按用户要求遗忘]` 标记并失效快照 | `anchor?`, `date?`, `keyword?`, `sessionId?` |
-| **M2** | `memory_history_browse` | 浏览 `history/` 的 L0 `.abstract.md` / L1 `.overview.md` 并按日期下钻 L2 日报 | `path?`, `level?` |
-| **M2/M3** | `memory_entity_manage` | 查看或维护 `entities/` 实体档案卡及其 `aliases` 触发词 | `action`, `name?`, `aliases?`, `content?` |
+| **M2** | `memory_history_browse` | 浏览 `history/` 的 L0 `.abstract.md` / L1 `.overview.md`、重建单跳索引并引导下钻 L2 日报 | `action` (`list` \| `read` \| `rebuild`), `month?`, `level?` |
+| **M2** | `memory_entity_manage` | 列出、读取、增改或删除 `entities/` 实体档案卡及其 `aliases` 触发词 | `action` (`list` \| `read` \| `upsert` \| `delete`), `name?`, `type?`, `aliases?`, `content?`, `op?`, `supersedesId?`, `pinned?`, `force?` |
 | **M4** | `memory_dream_now` | 手动触发一次后台整理提案（生成合并/冲突/过期建议到缓冲区） | `dryRun?` |
 | **M4** | `memory_rollback` | 回滚某次 `PROFILE.md` 变更（从 `retired.jsonl` 恢复） | `entryId` |
 
@@ -478,7 +502,7 @@ export function apply(ctx, config = {}) {
 |---|---|---|---|
 | **M1（核心闭环）** | 时间轴基础 + 缓冲 + 缓存冻结 + 遗忘与无痕 | 1. 存储底座（明确主存储与可重建索引边界）与 `session/event` 采集（`subagentPolicy: 'user-only'`、`isAppendSurfaceEvent`、三态无痕）<br>2. 可注入 `clock` 的空闲切日状态机 + 日内分块 Map-Reduce + 锚点核验 + 6 段式不可变日报<br>3. 按日轮转追加式缓冲区 `buffer/YYYY-MM-DD.jsonl`（含 `note` 日结归档、防冒用 `explicit`、超 2k 拒绝自动落盘）<br>4. 按 `(session_id, logical_date)` 冻结的前缀（含绝对日期与确定性裁剪）+ `agent/pre-step` 持久化动态增量（含 `replaceGeneration` 重置）<br>5. 7 个 M1 工具（含 `memory_forget`）+ 单元测试 + `bot-dev` 实机挂载 | 1. 单测用可控 `clock` 覆盖跨天快照刷新、切日边界、幂等/补结、日内分块、伪锚点剔除、缓冲区并发追加、FTS5 中英文检索、Compaction 重置、`memory_forget` 与无痕模式<br>2. 实机 `3085` 端口加载 `dsh-memory`（`ds-bot` 配 `memory: false`）正常对话、检索、手动日结与遗忘 |
 | **M2（OpenViking 历史层 + 实体起步）** | 跨月历史不断层 + 人/事卡片 | 1. 由 `journals/*.md` 单跳生成 `history/.abstract.md` 与 `history/YYYY-MM/.overview.md` 并启用 `sections.historyOverview`<br>2. `memory_history_browse` L0/L1/L2 渐进下钻工具<br>3. `entities/` 实体卡与别名命中动态增量注入 | 数月历史仅用 <= 1k tokens 常驻总览即可下钻回查任意月日报；提及人/项目别名时自动动态注入实体卡而不击穿前缀缓存 |
-| **M3（每日确认体验）** | 低摩擦把关与纠偏闭环 | 1. 晨报汇总摘要（昨日日报亮点 + `buffer/` 待确认列表）<br>2. 交互确认卡片（利用 DSH `show_view` / `ask_user` 一键勾选）<br>3. 自动纠偏检测与 `ds-bot` 换 Part 薄桥接完善 | 每天首次交互可用极低成本完成“记忆勾选确认 + 纠偏入库” |
+| **M3（冷启动引导、每日确认与服务契约）** | 冷启动建档 + 低摩擦把关 + 单向开放契约 | 1. 初始画像冷启动引导（首次空画像时发简短问卷或 `show_view` / `ask_user_question` 交互弹窗采集基础画像，支持跳过）<br>2. 晨报汇总摘要（昨日日报亮点 + `buffer/` 待确认列表）与低摩擦批量勾选确认<br>3. 轻量纠偏捕获（`source_type: 'correction'` + 真实用户 `anchor`）<br>4. 公开 Cordis 服务与标准事件契约（供 `dsh-ctrl` 等上层 Bot 单向绑定，保持 `dsh-memory` 零 `ds-bot` 依赖） | 首次启用即可快速建立初始画像；每天首次交互可用极低成本完成“记忆勾选确认 + 纠偏入库”；原版 DSH 独立可用，上层 Bot 可通过公开契约零侵入联动 |
 | **M4（Dream 后台整理）** | 跨月自维护不退化 | 1. 低频后台 Dream 四阶段任务（`Orient -> Gather -> Consolidate -> Prune`）<br>2. `retired.jsonl` 备份与 `memory_rollback` 回滚能力<br>3. 回归问答集验证跨月准确率不下降 | 长期运行无重复矛盾条目，`pinned` 零误删，每次整理可审计可回滚 |
 
 ### 5.2 本地开发与红线约束

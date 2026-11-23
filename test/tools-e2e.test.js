@@ -38,27 +38,42 @@ function createE2eHarness(t, clock) {
         return () => tools.delete(def.name)
       },
     },
-    agentDefaultModel: {
-      currentSelection: () => ({ provider: 'mock', model: 'mock-flash' }),
+    get(name) {
+      if (name === 'agentDefaultModel') {
+        return { currentSelection: () => ({ provider: 'mock', model: 'mock-flash' }) }
+      }
+      return undefined
     },
     llm: {
-      async* stream() {
-        const text = [
-          '# 2026-11-21 日报',
-          '## 发生了什么',
-          '- [chat://2026-11-21#main#1] 用户要求记住汇报风格偏好与删除测试机密。',
-          '- [chat://2026-11-21#main#2] 测试机密字段 TempSecretToken 被记录过。',
-          '## 做出的决定',
-          '- （无）',
-          '## 新建/变更的事项',
-          '- （无）',
-          '## 纠正与教训',
-          '- （无）',
-          '## 悬而未决的问题',
-          '- （无）',
-          '## 提到的实体',
-          '- （无）',
-        ].join('\n')
+      async* stream(request) {
+        const promptText = request?.messages?.[0]?.content?.[0]?.text ?? ''
+        const text = promptText.includes('目标月份')
+          ? [
+            '===L0_ABSTRACT===',
+            '十一月记录了汇报偏好并测试了遗忘清理流程。',
+            '===L1_OVERVIEW===',
+            '# 2026-11 月度概览',
+            '',
+            '## 核心事件索引',
+            '- [2026-11-21] [chat://2026-11-21#main#1] 记录汇报风格偏好。',
+            '- [2026-11-21] [chat://2026-11-21#main#2] 测试机密字段 TempSecretToken 记录。',
+          ].join('\n')
+          : [
+            '# 2026-11-21 日报',
+            '## 发生了什么',
+            '- [chat://2026-11-21#main#1] 用户要求记住汇报风格偏好与删除测试机密。',
+            '- [chat://2026-11-21#main#2] 测试机密字段 TempSecretToken 被记录过。',
+            '## 做出的决定',
+            '- （无）',
+            '## 新建/变更的事项',
+            '- （无）',
+            '## 纠正与教训',
+            '- （无）',
+            '## 悬而未决的问题',
+            '- （无）',
+            '## 提到的实体',
+            '- （无）',
+          ].join('\n')
         yield { type: 'block-start', index: 0, blockType: 'text' }
         yield { type: 'text-delta', index: 0, text }
         yield { type: 'block-end', index: 0, block: { type: 'text', text } }
@@ -92,7 +107,7 @@ function createE2eHarness(t, clock) {
   return { home, rt, tools, promptSections, emitSessionEvent, runTool }
 }
 
-test('E2E workflow across all 7 M1 tools including buffer, digest, search, mode switch, and forget', async (t) => {
+test('E2E workflow across all 9 M1+M2 tools including buffer, digest, history, entities, search, mode switch, and forget', async (t) => {
   let nowMs = Date.parse('2026-11-21T16:00:00+08:00')
   const clock = { now: () => nowMs }
   const { rt, tools, emitSessionEvent, runTool } = createE2eHarness(t, clock)
@@ -101,7 +116,9 @@ test('E2E workflow across all 7 M1 tools including buffer, digest, search, mode 
     'memory_buffer_add',
     'memory_buffer_manage',
     'memory_digest_now',
+    'memory_entity_manage',
     'memory_forget',
+    'memory_history_browse',
     'memory_journal_read',
     'memory_mode_set',
     'memory_search',
@@ -151,6 +168,7 @@ test('E2E workflow across all 7 M1 tools including buffer, digest, search, mode 
     reason: '用户确认通过',
   })
   assert.equal(approvedMsg.includes('approved'), true)
+  assert.equal(approvedMsg.includes('daily rollover') && approvedMsg.includes('memory_digest_now'), true)
 
   // Advance clock to next logical day (2026-11-22) and run manual digest for yesterday (2026-11-21)
   nowMs = Date.parse('2026-11-22T10:00:00+08:00')
@@ -158,22 +176,51 @@ test('E2E workflow across all 7 M1 tools including buffer, digest, search, mode 
   assert.equal(digestOut.includes('Generated journal for 2026-11-21'), true)
   assert.equal(digestOut.includes('Profile committed: 2'), true)
 
-  // 3. Read journal & list dates
+  // 3. Read journal & browse OpenViking history + manage entities
   const datesList = await runTool('memory_journal_read', {})
   assert.equal(datesList.includes('2026-11-21'), true)
   const journalBody = await runTool('memory_journal_read', { date: '2026-11-21' })
   assert.equal(journalBody.includes('TempSecretToken'), true)
 
-  // 4. Search archive + journal
+  const histList = await runTool('memory_history_browse', { action: 'list' })
+  assert.equal(histList.includes('2026-11'), true)
+  const histRead = await runTool('memory_history_browse', { action: 'read', month: '2026-11', level: 'L1' })
+  assert.equal(histRead.includes('L2 daily journals in 2026-11: 2026-11-21'), true)
+
+  const entUpsert = await runTool('memory_entity_manage', {
+    action: 'upsert',
+    name: '测试服务器',
+    type: 'server',
+    aliases: ['TestBox'],
+    content: '包含测试凭据 TempSecretToken',
+  })
+  assert.equal(entUpsert.includes('Updated entity'), true)
+  const entList = await runTool('memory_entity_manage', { action: 'list' })
+  assert.equal(entList.includes('测试服务器'), true)
+
+  // 4. Search archive + journal (exact, multi-term OR fallback, and date browse without query)
   const searchOut = await runTool('memory_search', { query: 'TempSecretToken' })
   assert.equal(searchOut.includes('Journal Matches'), true)
   assert.equal(searchOut.includes('Archive Matches'), true)
 
-  // 5. Forget TempSecretToken -> deletes archive + redacts journal + invalidates snapshot
-  rt.contextApi.sectionFor('main')
+  const fallbackSearchOut = await runTool('memory_search', { query: 'TempSecretToken 不存在的词' })
+  assert.equal(fallbackSearchOut.includes('Journal Matches'), true)
+  assert.equal(fallbackSearchOut.includes('Archive Matches'), true)
+
+  const browseByDateOut = await runTool('memory_search', { dateFrom: '2026-11-21', dateTo: '2026-11-21' })
+  assert.equal(browseByDateOut.includes('Archive Matches'), true)
+  assert.equal(browseByDateOut.includes('chat://2026-11-21#main#2'), true)
+  const browseDefaultOut = await runTool('memory_search', {})
+  assert.equal(browseDefaultOut.includes('Archive Matches'), true)
+
+  // 5. Forget TempSecretToken -> deletes archive + redacts journal, entity, and history + invalidates snapshot
+  const snapshotText = rt.contextApi.sectionFor('main')
+  assert.equal(snapshotText.includes('严禁使用 shell/文件工具'), true)
   const forgetOut = await runTool('memory_forget', { keyword: 'TempSecretToken' })
   assert.equal(forgetOut.includes('Forgot 1 archived message(s)'), true)
   assert.equal(forgetOut.includes('Redacted 1 daily journal(s): 2026-11-21'), true)
+  assert.equal(forgetOut.includes('Redacted 1 entity card(s): 测试服务器'), true)
+  assert.equal(forgetOut.includes('Redacted 1 history month(s): 2026-11'), true)
 
   const afterSearch = await runTool('memory_search', { query: 'TempSecretToken' })
   assert.equal(afterSearch.includes('No memory matches found'), true)

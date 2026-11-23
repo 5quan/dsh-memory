@@ -122,7 +122,7 @@ function buildDigestPrompt({ logicalDate, transcriptText, notes }) {
   return `目标逻辑日期：${logicalDate}\n\n请根据以下对话原文生成 "# ${logicalDate} 日报"：\n\n${transcriptText}${noteBlock}`
 }
 
-export function createDigestApi({ ctx, config, store, bufferApi, profileApi, journalApi, clock = { now: () => Date.now() }, warn = () => {} }) {
+export function createDigestApi({ ctx, config, store, bufferApi, profileApi, journalApi, entityApi, historyApi, clock = { now: () => Date.now() }, warn = () => {} }) {
   async function generateDailyDigest(logicalDate, { scope = 'default', force = false, signal } = {}) {
     const existing = journalApi.readJournal(config.home, logicalDate)
     if (existing !== '' && !force) {
@@ -200,6 +200,29 @@ export function createDigestApi({ ctx, config, store, bufferApi, profileApi, jou
       warn('dsh-memory: buffer item %s was not auto-committed (%s)', warning.id, warning.reason)
     }
 
+    const entitySettlement = entityApi
+      ? await bufferApi.settleEntitiesForDate({
+        logicalDate,
+        scope,
+        store,
+        entityApi,
+        config,
+      })
+      : { committed: [], deferred: [], warnings: [] }
+
+    for (const warning of entitySettlement.warnings) {
+      warn('dsh-memory: entity buffer item %s was not auto-committed (%s)', warning.id, warning.reason)
+    }
+
+    let historyRefresh = null
+    if (historyApi && config.sections.historyOverview.enabled) {
+      try {
+        historyRefresh = await historyApi.rebuildMonthHistory(logicalDate.slice(0, 7), { signal })
+      } catch (historyError) {
+        warn('dsh-memory: monthly history refresh failed for %s: %s', logicalDate.slice(0, 7), historyError?.message ?? historyError)
+      }
+    }
+
     return {
       ok: true,
       skipped: false,
@@ -208,6 +231,8 @@ export function createDigestApi({ ctx, config, store, bufferApi, profileApi, jou
       unverifiedAnchors,
       closedNotes,
       profileSettlement,
+      entitySettlement,
+      historyRefresh,
       chunks: chunks.length,
     }
   }

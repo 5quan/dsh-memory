@@ -211,50 +211,139 @@ export function createMemoryStore(dbPath) {
     return stmtListDates.all(scope).map(row => row.logical_date)
   }
 
+  function dedupSearchTerms(query) {
+    const seen = new Set()
+    const terms = []
+    for (const raw of String(query ?? '').trim().split(/\s+/)) {
+      if (!raw) continue
+      const lower = raw.toLowerCase()
+      if (seen.has(lower)) continue
+      seen.add(lower)
+      terms.push(raw)
+    }
+    return terms
+  }
+
   function searchMessages({ query = '', dateFrom, dateTo, scope = 'default', limit = 20 } = {}) {
-    const terms = String(query ?? '').trim().split(/\s+/).filter(Boolean)
+    const terms = dedupSearchTerms(query)
     const longTerms = terms.filter(term => [...term].length >= 3)
     const shortTerms = terms.filter(term => [...term].length < 3)
     const safeLimit = Math.min(Math.max(Number.parseInt(limit, 10) || 20, 1), 100)
 
-    if (terms.length === 0 && !dateFrom && !dateTo) return []
-
-    const where = ['m.scope = ?']
-    const args = [scope]
+    const baseWhere = ['m.scope = ?']
+    const baseArgs = [scope]
     if (dateFrom) {
-      where.push('m.logical_date >= ?')
-      args.push(dateFrom)
+      baseWhere.push('m.logical_date >= ?')
+      baseArgs.push(dateFrom)
     }
     if (dateTo) {
-      where.push('m.logical_date <= ?')
-      args.push(dateTo)
-    }
-    for (const term of shortTerms) {
-      where.push("m.text LIKE ? ESCAPE '\\'")
-      args.push(likeEscape(term))
+      baseWhere.push('m.logical_date <= ?')
+      baseArgs.push(dateTo)
     }
 
+    if (terms.length === 0) {
+      if (!dateFrom && !dateTo) return []
+      const browseSql = `
+        SELECT m.*
+        FROM messages m
+        WHERE ${baseWhere.join(' AND ')}
+        ORDER BY m.timestamp DESC, m.seq DESC
+        LIMIT ?
+      `
+      return db.prepare(browseSql).all(...baseArgs, safeLimit)
+    }
+
+    // Phase 1: Strict AND matching across all terms
+    const andWhere = [...baseWhere]
+    const andArgs = [...baseArgs]
+    for (const term of shortTerms) {
+      andWhere.push("m.text LIKE ? ESCAPE '\\'")
+      andArgs.push(likeEscape(term))
+    }
+
+    let andRows
     if (longTerms.length > 0) {
       const ftsMatch = longTerms.map(term => `"${term.replace(/"/g, '""')}"`).join(' ')
       const sql = `
         SELECT m.*
         FROM messages_fts f
         JOIN messages m ON m.id = f.rowid
-        WHERE messages_fts MATCH ? AND ${where.join(' AND ')}
+        WHERE messages_fts MATCH ? AND ${andWhere.join(' AND ')}
         ORDER BY bm25(messages_fts), m.timestamp DESC
         LIMIT ?
       `
-      return db.prepare(sql).all(ftsMatch, ...args, safeLimit)
+      andRows = db.prepare(sql).all(ftsMatch, ...andArgs, safeLimit)
+    } else {
+      const sql = `
+        SELECT m.*
+        FROM messages m
+        WHERE ${andWhere.join(' AND ')}
+        ORDER BY m.timestamp DESC, m.seq DESC
+        LIMIT ?
+      `
+      andRows = db.prepare(sql).all(...andArgs, safeLimit)
     }
 
-    const sql = `
-      SELECT m.*
-      FROM messages m
-      WHERE ${where.join(' AND ')}
-      ORDER BY m.timestamp DESC, m.seq DESC
-      LIMIT ?
-    `
-    return db.prepare(sql).all(...args, safeLimit)
+    if (andRows.length > 0 || terms.length <= 1) return andRows
+
+    // Phase 2: Multi-term OR fallback ranked by matched term coverage
+    const candidateLimit = Math.min(Math.max(safeLimit * 5, 50), 200)
+    const byId = new Map()
+    const baseClause = baseWhere.join(' AND ')
+
+    if (longTerms.length > 0) {
+      const ftsOr = longTerms.map(term => `"${term.replace(/"/g, '""')}"`).join(' OR ')
+      const sql = `
+        SELECT m.*
+        FROM messages_fts f
+        JOIN messages m ON m.id = f.rowid
+        WHERE messages_fts MATCH ? AND ${baseClause}
+        ORDER BY bm25(messages_fts), m.timestamp DESC
+        LIMIT ?
+      `
+      for (const row of db.prepare(sql).all(ftsOr, ...baseArgs, candidateLimit)) {
+        byId.set(row.id, row)
+      }
+    }
+
+    if (shortTerms.length > 0) {
+      const shortOr = shortTerms.map(() => "m.text LIKE ? ESCAPE '\\'").join(' OR ')
+      const sql = `
+        SELECT m.*
+        FROM messages m
+        WHERE ${baseClause} AND (${shortOr})
+        ORDER BY m.timestamp DESC, m.seq DESC
+        LIMIT ?
+      `
+      for (const row of db.prepare(sql).all(...baseArgs, ...shortTerms.map(likeEscape), candidateLimit)) {
+        if (!byId.has(row.id)) byId.set(row.id, row)
+      }
+    }
+
+    const lowerTerms = terms.map(term => ({ lower: term.toLowerCase(), len: [...term].length }))
+    const scored = []
+    for (const row of byId.values()) {
+      const textLower = String(row.text ?? '').toLowerCase()
+      let matchedCount = 0
+      let matchedChars = 0
+      for (const item of lowerTerms) {
+        if (textLower.includes(item.lower)) {
+          matchedCount += 1
+          matchedChars += item.len
+        }
+      }
+      if (matchedCount > 0) {
+        scored.push({ row, matchedCount, matchedChars })
+      }
+    }
+
+    scored.sort((a, b) =>
+      b.matchedCount - a.matchedCount ||
+      b.matchedChars - a.matchedChars ||
+      b.row.timestamp - a.row.timestamp ||
+      b.row.seq - a.row.seq)
+
+    return scored.slice(0, safeLimit).map(item => item.row)
   }
 
   function getSessionState(sessionId) {
