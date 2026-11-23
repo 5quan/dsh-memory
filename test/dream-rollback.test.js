@@ -19,6 +19,7 @@ function setupDreamEnv(t, { dreamConfig = {}, llmHandler } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-memory-dream-'))
   let nowMs = Date.parse('2026-11-25T10:00:00+08:00')
   const clock = { now: () => nowMs }
+  assert.equal(normalizeConfig({ home: dir }).dream.useLlm, false)
   const config = normalizeConfig({
     home: dir,
     timeZone: 'Asia/Shanghai',
@@ -26,6 +27,7 @@ function setupDreamEnv(t, { dreamConfig = {}, llmHandler } = {}) {
     idleMinutes: 30,
     dream: {
       enabled: true,
+      useLlm: true,
       intervalDays: 7,
       minNewJournals: 1,
       maxChangeRatio: 0.2,

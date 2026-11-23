@@ -451,7 +451,7 @@ test('buffer settlement, daily digest, Dream governance, memory_forget, and publ
   assert.equal(svc.listLessons().length, 2)
 
   // Dream processes rule (expires + duplicate) & LLM proposals (pinned/authority/not_found/conflict)
-  const dreamDry = await rt.dreamApi.runDream({ dryRun: true, force: true })
+  const dreamDry = await rt.dreamApi.runDream({ dryRun: true, force: true, useLlm: true })
   assert.equal(dreamDry.llmStatus, 'ok')
   assert.equal(dreamDry.proposals.some(p => p.target === 'lesson:Nginx部署' && p.targetId === 'les_03'), true)
   assert.equal(dreamDry.proposals.some(p => p.target === 'lesson:Nginx部署' && p.targetId === 'les_04'), true)
