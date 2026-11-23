@@ -1,0 +1,40 @@
+{
+  "name": "dsh-memory",
+  "version": "0.1.0",
+  "description": "Date-based anti-rot personal assistant memory plugin for DeepSeek Harness (DSH).",
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "dsh",
+    "memory",
+    "daily-memory"
+  ],
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "src/",
+    "cordis.patch.yml",
+    "docs/",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --import ./test/harness-resolve.mjs --test --test-timeout=120000 \"test/*.test.js\""
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-llm": "*",
+    "@deepseek-ai/dsh-session": "*",
+    "@deepseek-ai/dsh-tools": "*"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
