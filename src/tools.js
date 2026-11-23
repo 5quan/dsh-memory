@@ -7,7 +7,7 @@ const stringOutput = {
   render: (_args, value) => [{ type: 'text', text: String(value) }],
 }
 
-export function createToolsApi({ ctx, config, store, bufferApi, journalApi, digestApi, contextApi, clock = { now: () => Date.now() } }) {
+export function createToolsApi({ ctx, config, store, bufferApi, journalApi, digestApi, contextApi, historyApi, entityApi, clock = { now: () => Date.now() } }) {
   function currentLogicalDate() {
     return logicalDateOf(clock.now(), {
       timeZone: config.timeZone,
@@ -259,12 +259,16 @@ export function createToolsApi({ ctx, config, store, bufferApi, journalApi, dige
           error: null,
         })
         contextApi.invalidateSnapshots()
+        const entityCountText = res.entitySettlement
+          ? `, Entities committed: ${res.entitySettlement.committed.length}, Entity deferred: ${res.entitySettlement.deferred.length}`
+          : ''
+        const allWarnings = [...res.profileSettlement.warnings, ...(res.entitySettlement?.warnings ?? [])]
         return [
           `Generated journal for ${targetDate} (${res.chunks} chunk(s)): ${res.path}`,
-          `Notes closed: ${res.closedNotes.length}, Profile committed: ${res.profileSettlement.committed.length}, Deferred: ${res.profileSettlement.deferred.length}`,
+          `Notes closed: ${res.closedNotes.length}, Profile committed: ${res.profileSettlement.committed.length}, Deferred: ${res.profileSettlement.deferred.length}${entityCountText}`,
           ...(res.unverifiedAnchors.length > 0 ? [`Stripped unverified anchors: ${res.unverifiedAnchors.join(', ')}`] : []),
-          ...(res.profileSettlement.warnings.length > 0
-            ? [`Warnings: ${res.profileSettlement.warnings.map(w => `${w.id}:${w.reason}`).join(', ')}`]
+          ...(allWarnings.length > 0
+            ? [`Warnings: ${allWarnings.map(w => `${w.id}:${w.reason}`).join(', ')}`]
             : []),
         ].join('\n')
       },
@@ -272,7 +276,7 @@ export function createToolsApi({ ctx, config, store, bufferApi, journalApi, dige
 
     defineTool({
       name: 'memory_forget',
-      description: 'Actively forget memories requested by the user: permanently deletes matching messages from archive and FTS5, rejects matching buffer items, redacts matching lines in daily journals, and invalidates snapshots.',
+      description: 'Actively forget memories requested by the user: permanently deletes matching messages from archive and FTS5, rejects matching buffer items, redacts matching lines in daily journals, entities, and history index, and invalidates snapshots.',
       parameters: {
         anchor: { type: 'string', description: 'Exact chat:// anchor to forget.' },
         date: { type: 'string', description: 'Optional logical date filter (YYYY-MM-DD).' },
@@ -310,13 +314,168 @@ export function createToolsApi({ ctx, config, store, bufferApi, journalApi, dige
           todayDate,
         })
 
+        const redactedEntities = entityApi
+          ? await entityApi.redactEntitiesForForget(config.home, {
+            anchors: anchorsToReject,
+            keyword: args.keyword?.trim() || undefined,
+            todayDate,
+          })
+          : { updatedEntities: [] }
+
+        const redactedHistory = historyApi
+          ? await historyApi.redactHistoryForForget({
+            anchors: anchorsToReject,
+            keyword: args.keyword?.trim() || undefined,
+            affectedDates: [...new Set([...deleted.affectedDates, ...redactedJournals])],
+            todayDate,
+          })
+          : { updatedMonths: [] }
+
         contextApi.invalidateSnapshots()
 
         return [
           `Forgot ${deleted.deletedCount} archived message(s).`,
           `Rejected ${rejectedBufferIds.length} buffer item(s).`,
           `Redacted ${redactedJournals.length} daily journal(s)${redactedJournals.length > 0 ? `: ${redactedJournals.join(', ')}` : ''}.`,
+          `Redacted ${redactedEntities.updatedEntities.length} entity card(s)${redactedEntities.updatedEntities.length > 0 ? `: ${redactedEntities.updatedEntities.join(', ')}` : ''}.`,
+          `Redacted ${redactedHistory.updatedMonths.length} history month(s)${redactedHistory.updatedMonths.length > 0 ? `: ${redactedHistory.updatedMonths.join(', ')}` : ''}.`,
         ].join(' ')
+      },
+    }),
+
+    defineTool({
+      name: 'memory_history_browse',
+      description: 'Browse OpenViking L0/L1 historical memory index by month or rebuild it single-hop from immutable daily journals, then drill down to L2 with memory_journal_read.',
+      parameters: {
+        action: { type: 'string', enum: ['list', 'read', 'rebuild'], required: true, description: 'Operation: list months, read L0/L1 overview, or rebuild from journals.' },
+        month: { type: 'string', description: 'Month in YYYY-MM format (optional on list/rebuild; defaults to latest month on read).' },
+        level: { type: 'string', enum: ['L0', 'L1'], description: 'Detail level to read (default "L1").' },
+      },
+      output: stringOutput,
+      isConcurrencySafe: args => args?.action !== 'rebuild',
+      async execute(args, exec) {
+        if (effectiveModeOf(exec.agent?.id) === 'off') {
+          return 'Memory is disabled (mode=off) for this session.'
+        }
+        if (!historyApi) {
+          return 'History index module is not available.'
+        }
+
+        if (args.action === 'list') {
+          const data = historyApi.readHistory()
+          if (data.months.length === 0) {
+            return 'No historical monthly summaries have been built yet.'
+          }
+          return [
+            data.global || '# 历史总览地图（L0）',
+            '',
+            'Available months:',
+            ...data.months.map(m => `- ${m.month}${m.hasOverview ? ' (L0+L1)' : ' (L0)'}: ${m.abstract}`),
+          ].join('\n')
+        }
+
+        if (args.action === 'rebuild') {
+          const month = args.month?.trim()
+          if (month) {
+            const res = await historyApi.rebuildMonthHistory(month, { signal: exec.signal })
+            contextApi.invalidateSnapshots()
+            return res.removed
+              ? `Cleared empty history index for ${month} (no journals found).`
+              : `Rebuilt ${month} history index from ${res.journalCount} journal(s).`
+          }
+          const res = await historyApi.rebuildAllHistory({ signal: exec.signal })
+          contextApi.invalidateSnapshots()
+          return `Rebuilt history index for ${res.months.length} month(s).`
+        }
+
+        const months = historyApi.listHistoryMonths()
+        const targetMonth = args.month?.trim() || months.at(-1)?.month
+        if (!targetMonth) {
+          return 'No historical monthly summaries found.'
+        }
+        const level = args.level === 'L0' ? 'L0' : 'L1'
+        const res = historyApi.readHistory({ month: targetMonth, level })
+        if (!res.abstract && !res.overview) {
+          return `No history index found for ${targetMonth}.${res.journalDates.length > 0 ? ` Available L2 journals: ${res.journalDates.join(', ')}` : ''}`
+        }
+        const parts = [`## ${targetMonth} History (${level})`]
+        if (res.abstract) parts.push(`### L0 Abstract\n${res.abstract}`)
+        if (level === 'L1' && res.overview) parts.push(`### L1 Overview\n${res.overview}`)
+        if (res.journalDates.length > 0) {
+          parts.push(`L2 daily journals in ${targetMonth}: ${res.journalDates.join(', ')} (use memory_journal_read to inspect full details)`)
+        }
+        return parts.join('\n\n')
+      },
+    }),
+
+    defineTool({
+      name: 'memory_entity_manage',
+      description: 'List, read, create/update, or delete entity memory cards (people, projects, servers) and their alias triggers.',
+      parameters: {
+        action: { type: 'string', enum: ['list', 'read', 'upsert', 'delete'], required: true, description: 'Operation on entity cards.' },
+        name: { type: 'string', description: 'Entity name, alias, or slug (required for read/upsert/delete).' },
+        type: { type: 'string', description: 'Entity type (e.g. person, project, server, tool).' },
+        aliases: { type: 'array', items: { type: 'string' }, description: 'Aliases that automatically trigger dynamic context injection.' },
+        content: { type: 'string', description: 'Fact content to add or replace.' },
+        op: { type: 'string', enum: ['add', 'replace', 'retire'], description: 'Fact mutation operation on upsert (default "add").' },
+        supersedesId: { type: 'string', description: 'Existing fact id (e.g. ent_01) to replace or retire.' },
+        pinned: { type: 'boolean', description: 'Pin this fact against automated deletion.' },
+        force: { type: 'boolean', description: 'Force delete even when the entity holds pinned facts.' },
+      },
+      output: stringOutput,
+      async execute(args, exec) {
+        const sessionId = exec.agent?.id
+        const mode = effectiveModeOf(sessionId)
+        if (mode === 'off') {
+          return 'Memory is disabled (mode=off) for this session.'
+        }
+        if (!entityApi) {
+          return 'Entity cards module is not available.'
+        }
+
+        if (args.action === 'list') {
+          const entities = entityApi.listEntities(config.home)
+          if (entities.length === 0) return 'No entity cards saved yet.'
+          return entities
+            .map(e => `- ${e.name} [${e.slug}] (${e.type}; aliases: ${e.aliases.join(', ') || 'none'}; facts: ${e.facts.length})`)
+            .join('\n')
+        }
+
+        const name = args.name?.trim()
+        if (!name) return `Please provide "name" for entity action "${args.action}".`
+
+        if (args.action === 'read') {
+          const entity = entityApi.readEntity(config.home, name)
+          return entity ? entity.raw : `No entity card found matching "${name}".`
+        }
+
+        if (mode !== 'full') {
+          return `Cannot modify entity cards while session mode is "${mode}".`
+        }
+
+        if (args.action === 'delete') {
+          const res = await entityApi.deleteEntity(config.home, name, { force: args.force === true })
+          if (!res.ok) return `Failed to delete entity "${name}": ${res.reason}.`
+          return `Deleted entity card "${res.slug}".`
+        }
+
+        const latestUser = sessionId ? store.getLatestUserMessage(sessionId) : undefined
+        const res = await entityApi.upsertEntity(config.home, {
+          name,
+          type: args.type,
+          aliases: args.aliases,
+          op: args.op ?? 'add',
+          content: args.content,
+          supersedesId: args.supersedesId,
+          added: currentLogicalDate(),
+          source: latestUser?.anchor ?? 'manual',
+          pinned: args.pinned === true,
+          allowPinned: true,
+        })
+        if (!res.ok) {
+          return `Failed to upsert entity "${name}": ${res.reason}.`
+        }
+        return `Updated entity "${res.entity.name}" (${res.slug})${res.factId ? `, fact=${res.factId}` : ''}.`
       },
     }),
   ]

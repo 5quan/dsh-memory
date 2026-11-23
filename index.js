@@ -3,7 +3,9 @@ import { normalizeConfig } from './src/config.js'
 import { createMemoryStore } from './src/store.js'
 import * as profileApi from './src/profile.js'
 import * as journalApi from './src/journal.js'
+import * as entityApi from './src/entities.js'
 import { createBufferApi } from './src/buffer.js'
+import { createHistoryApi } from './src/history.js'
 import { createDigestApi } from './src/digest.js'
 import { createRolloverApi } from './src/rollover.js'
 import { createIngestApi } from './src/ingest.js'
@@ -25,6 +27,13 @@ export function createMemoryRuntime(ctx, rawConfig = {}, deps = {}) {
   ctx.effect(() => () => store.close(), 'dsh-memory: close archive.sqlite')
 
   const bufferApi = createBufferApi({ home: config.home, clock })
+  const historyApi = createHistoryApi({
+    ctx,
+    config,
+    store,
+    journalApi,
+    warn,
+  })
   const digestApi = createDigestApi({
     ctx,
     config,
@@ -32,6 +41,8 @@ export function createMemoryRuntime(ctx, rawConfig = {}, deps = {}) {
     bufferApi,
     profileApi,
     journalApi,
+    entityApi,
+    historyApi,
     clock,
     warn,
   })
@@ -42,6 +53,7 @@ export function createMemoryRuntime(ctx, rawConfig = {}, deps = {}) {
     profileApi,
     journalApi,
     bufferApi,
+    entityApi,
     clock,
     warn,
   })
@@ -71,6 +83,8 @@ export function createMemoryRuntime(ctx, rawConfig = {}, deps = {}) {
     journalApi,
     digestApi,
     contextApi,
+    historyApi,
+    entityApi,
     clock,
   })
 
@@ -98,6 +112,8 @@ export function createMemoryRuntime(ctx, rawConfig = {}, deps = {}) {
     store,
     profileApi,
     journalApi,
+    entityApi,
+    historyApi,
     bufferApi,
     digestApi,
     rolloverApi,

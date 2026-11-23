@@ -20,7 +20,7 @@ export function readProfile(home) {
   }
 }
 
-function parseMetaParts(rawMeta) {
+export function parseMetaParts(rawMeta) {
   const parts = String(rawMeta ?? '').split(';').map(item => item.trim()).filter(Boolean)
   const meta = { pinned: false }
   for (const part of parts) {

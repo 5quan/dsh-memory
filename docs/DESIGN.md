@@ -1,6 +1,6 @@
 # `dsh-memory` 架构设计说明书
 
-> 状态：设计定稿（评审修订完毕，可进入 M1 编码）  
+> 状态：M1 已落地，M2（OpenViking 历史总览与实体档案）已完成（`#1`）  
 > 仓库：`5quan/dsh-memory`  
 > 参考来源：DeepSeek Super-agent 设计探索（`https://zhuanlan.zhihu.com/p/2099987320443237060`）、`dsh-ctrl` 记忆体系前期探索、OpenViking L0/L1/L2 渐进披露范式、AutoDream 后台整理思想
 
@@ -463,8 +463,8 @@ export function apply(ctx, config = {}) {
 | **M1** | `memory_mode_set` | 切换当前会话或全局默认的无痕模式（`full` / `read-only` / `off`） | `mode`, `scope?` (`session` \| `global`) |
 | **M1** | `memory_digest_now` | 手动触发指定逻辑日（默认昨天，支持今天预览或显式重建）的日结生成 | `date?`, `force?` |
 | **M1** | `memory_forget` | 按用户要求主动遗忘：物理删除匹配原文与 FTS 索引、作废相关缓冲条目、给对应日报条目打 `[已按用户要求遗忘]` 标记并失效快照 | `anchor?`, `date?`, `keyword?`, `sessionId?` |
-| **M2** | `memory_history_browse` | 浏览 `history/` 的 L0 `.abstract.md` / L1 `.overview.md` 并按日期下钻 L2 日报 | `path?`, `level?` |
-| **M2/M3** | `memory_entity_manage` | 查看或维护 `entities/` 实体档案卡及其 `aliases` 触发词 | `action`, `name?`, `aliases?`, `content?` |
+| **M2** | `memory_history_browse` | 浏览 `history/` 的 L0 `.abstract.md` / L1 `.overview.md`、重建单跳索引并引导下钻 L2 日报 | `action` (`list` \| `read` \| `rebuild`), `month?`, `level?` |
+| **M2** | `memory_entity_manage` | 列出、读取、增改或删除 `entities/` 实体档案卡及其 `aliases` 触发词 | `action` (`list` \| `read` \| `upsert` \| `delete`), `name?`, `type?`, `aliases?`, `content?`, `op?`, `supersedesId?`, `pinned?`, `force?` |
 | **M4** | `memory_dream_now` | 手动触发一次后台整理提案（生成合并/冲突/过期建议到缓冲区） | `dryRun?` |
 | **M4** | `memory_rollback` | 回滚某次 `PROFILE.md` 变更（从 `retired.jsonl` 恢复） | `entryId` |
 

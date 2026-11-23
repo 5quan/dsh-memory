@@ -209,10 +209,10 @@ export function createBufferApi({ home, clock = { now: () => Date.now() } }) {
     })
   }
 
-  function settleProfileForDate({ logicalDate, scope = 'default', store, profileApi, config }) {
+  function settleWithGate({ logicalDate, scope = 'default', store, config, filter, resolveOverwrite, applyItem }) {
     return queued(async () => {
       const items = [...loadFoldedMap(logicalDate).values()].filter(
-        item => item.scope === scope && item.target === 'profile' && (item.status === 'pending' || item.status === 'approved'),
+        item => item.scope === scope && (item.status === 'pending' || item.status === 'approved') && filter(item),
       )
       const committed = []
       const warnings = []
@@ -241,10 +241,7 @@ export function createBufferApi({ home, clock = { now: () => Date.now() } }) {
           }
         }
 
-        const existingEntries = profileApi.parseProfileEntries(profileApi.readProfile(config.home))
-        const targetEntry = item.supersedes_id ? existingEntries.find(e => e.id === item.supersedes_id) : undefined
-        const isOverwrite = item.op !== 'add' || Boolean(item.supersedes_id) || Boolean(targetEntry?.pinned)
-
+        const isOverwrite = resolveOverwrite(item)
         if (item.status !== 'approved') {
           if (!autoSources.has(effectiveSource)) {
             deferred.push(item.id)
@@ -256,6 +253,41 @@ export function createBufferApi({ home, clock = { now: () => Date.now() } }) {
           }
         }
 
+        const result = await applyItem(item, effectiveSource)
+        if (!result.ok) {
+          warnings.push({ id: item.id, ...result })
+          deferred.push(item.id)
+          continue
+        }
+
+        await appendRawEvent(logicalDate, {
+          event: 'status',
+          id: item.id,
+          status: 'committed',
+          at,
+          by: item.status === 'approved' ? 'user-approved' : 'auto-commit',
+          reason: result.commitReason,
+        })
+        committed.push(item.id)
+      }
+
+      return { committed, deferred, warnings }
+    })
+  }
+
+  function settleProfileForDate({ logicalDate, scope = 'default', store, profileApi, config }) {
+    return settleWithGate({
+      logicalDate,
+      scope,
+      store,
+      config,
+      filter: item => item.target === 'profile',
+      resolveOverwrite: (item) => {
+        const existingEntries = profileApi.parseProfileEntries(profileApi.readProfile(config.home))
+        const targetEntry = item.supersedes_id ? existingEntries.find(e => e.id === item.supersedes_id) : undefined
+        return item.op !== 'add' || Boolean(item.supersedes_id) || Boolean(targetEntry?.pinned)
+      },
+      applyItem: async (item, effectiveSource) => {
         const result = await profileApi.applyProfileMutation(
           config.home,
           {
@@ -273,25 +305,41 @@ export function createBufferApi({ home, clock = { now: () => Date.now() } }) {
             allowPinned: item.status === 'approved',
           },
         )
+        return result.ok ? { ...result, commitReason: `committed to PROFILE.md (${result.id})` } : result
+      },
+    })
+  }
 
-        if (!result.ok) {
-          warnings.push({ id: item.id, ...result })
-          deferred.push(item.id)
-          continue
-        }
-
-        await appendRawEvent(logicalDate, {
-          event: 'status',
-          id: item.id,
-          status: 'committed',
-          at,
-          by: item.status === 'approved' ? 'user-approved' : 'auto-commit',
-          reason: `committed to PROFILE.md (${result.id})`,
+  function settleEntitiesForDate({ logicalDate, scope = 'default', store, entityApi, config }) {
+    return settleWithGate({
+      logicalDate,
+      scope,
+      store,
+      config,
+      filter: item => typeof item.target === 'string' && item.target.startsWith('entity:'),
+      resolveOverwrite: (item) => {
+        const entityName = item.target.slice('entity:'.length).trim()
+        const existing = entityApi.readEntity(config.home, entityName)
+        const targetFact = item.supersedes_id ? existing?.facts.find(f => f.id === item.supersedes_id) : undefined
+        return item.op !== 'add' || Boolean(item.supersedes_id) || Boolean(targetFact?.pinned)
+      },
+      applyItem: async (item, effectiveSource) => {
+        const entityName = item.target.slice('entity:'.length).trim()
+        const result = await entityApi.upsertEntity(config.home, {
+          name: entityName,
+          op: item.op,
+          content: item.content,
+          targetId: item.supersedes_id,
+          supersedesId: item.supersedes_id,
+          added: item.logical_date,
+          source: item.anchor || effectiveSource,
+          pinned: item.pinned,
+          allowPinned: item.status === 'approved',
         })
-        committed.push(item.id)
-      }
-
-      return { committed, deferred, warnings }
+        return result.ok
+          ? { ...result, commitReason: `committed to entities/${result.slug}.md (${result.factId ?? 'card'})` }
+          : result
+      },
     })
   }
 
@@ -324,6 +372,7 @@ export function createBufferApi({ home, clock = { now: () => Date.now() } }) {
     updateStatuses,
     rejectByAnchors,
     settleProfileForDate,
+    settleEntitiesForDate,
     closeNotesForDate,
   }
 }
