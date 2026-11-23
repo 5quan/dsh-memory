@@ -1,6 +1,7 @@
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { parseAnchor } from './util.js'
 
 const SCHEMA_VERSION = 2
 
@@ -125,6 +126,19 @@ export function createMemoryStore(dbPath) {
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `)
   const stmtGetByAnchor = db.prepare('SELECT * FROM messages WHERE anchor = ? LIMIT 1')
+  const stmtGetBySessionSeq = db.prepare('SELECT * FROM messages WHERE session_id = ? AND seq = ? LIMIT 1')
+  const stmtBeforeRows = db.prepare(`
+    SELECT * FROM messages
+    WHERE session_id = ? AND scope = ? AND seq < ?
+    ORDER BY seq DESC, id DESC
+    LIMIT ?
+  `)
+  const stmtAfterRows = db.prepare(`
+    SELECT * FROM messages
+    WHERE session_id = ? AND scope = ? AND seq > ?
+    ORDER BY seq ASC, id ASC
+    LIMIT ?
+  `)
   const stmtHasAnchorForDate = db.prepare('SELECT 1 AS ok FROM messages WHERE anchor = ? AND logical_date = ? LIMIT 1')
   const stmtMessagesForDate = db.prepare(`
     SELECT * FROM messages
@@ -213,6 +227,44 @@ export function createMemoryStore(dbPath) {
 
   function getMessageByAnchor(anchor) {
     return stmtGetByAnchor.get(anchor)
+  }
+
+  function getMessageContext({ anchor, before = 2, after = 2, scope } = {}) {
+    const cleanAnchor = String(anchor ?? '').trim()
+    if (!cleanAnchor) return null
+
+    let target = stmtGetByAnchor.get(cleanAnchor)
+    if (!target) {
+      const parsed = parseAnchor(cleanAnchor)
+      if (parsed) {
+        target = stmtGetBySessionSeq.get(parsed.sessionId, parsed.seq)
+      }
+    }
+    if (!target) return null
+    if (scope && target.scope !== scope) return null
+
+    const clampWindow = (val, fallback) => {
+      if (val === undefined || val === null) return fallback
+      const n = Number.parseInt(val, 10)
+      if (Number.isNaN(n)) return fallback
+      return Math.min(Math.max(n, 0), 20)
+    }
+    const beforeLimit = clampWindow(before, 2)
+    const afterLimit = clampWindow(after, 2)
+
+    const beforeRows = beforeLimit > 0
+      ? stmtBeforeRows.all(target.session_id, target.scope, target.seq, beforeLimit).reverse()
+      : []
+    const afterRows = afterLimit > 0
+      ? stmtAfterRows.all(target.session_id, target.scope, target.seq, afterLimit)
+      : []
+
+    return {
+      target,
+      before: beforeRows,
+      after: afterRows,
+      messages: [...beforeRows, target, ...afterRows],
+    }
   }
 
   function hasAnchorForDate(anchor, logicalDate) {
@@ -517,6 +569,7 @@ export function createMemoryStore(dbPath) {
     db,
     insertMessage,
     getMessageByAnchor,
+    getMessageContext,
     hasAnchorForDate,
     getMessagesForDate,
     getLatestUserMessage,

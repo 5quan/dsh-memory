@@ -63,6 +63,7 @@ export function normalizeConfig(raw = {}) {
   const rawOnboarding = src.onboarding && typeof src.onboarding === 'object' ? src.onboarding : {}
   const rawBriefing = src.briefing && typeof src.briefing === 'object' ? src.briefing : {}
   const rawCorrection = src.correction && typeof src.correction === 'object' ? src.correction : {}
+  const rawDream = src.dream && typeof src.dream === 'object' ? src.dream : {}
   const rawLlm = src.llm && typeof src.llm === 'object' ? src.llm : {}
 
   return {
@@ -106,6 +107,20 @@ export function normalizeConfig(raw = {}) {
       defaultSection: typeof rawCorrection.defaultSection === 'string' && rawCorrection.defaultSection.trim() !== ''
         ? rawCorrection.defaultSection.trim()
         : '长期规矩与边界',
+    },
+    dream: {
+      enabled: typeof rawDream.enabled === 'boolean' ? rawDream.enabled : true,
+      intervalDays: positiveInt(rawDream.intervalDays, 7),
+      minNewJournals: Number.isInteger(rawDream.minNewJournals) && rawDream.minNewJournals >= 0
+        ? rawDream.minNewJournals
+        : 3,
+      maxChangeRatio: typeof rawDream.maxChangeRatio === 'number' && Number.isFinite(rawDream.maxChangeRatio) && rawDream.maxChangeRatio >= 0 && rawDream.maxChangeRatio <= 1
+        ? rawDream.maxChangeRatio
+        : 0.2,
+      rejectCooldownDays: Number.isInteger(rawDream.rejectCooldownDays) && rawDream.rejectCooldownDays >= 0
+        ? rawDream.rejectCooldownDays
+        : 30,
+      instructions: typeof rawDream.instructions === 'string' ? rawDream.instructions.trim() : '',
     },
     llm: {
       provider: typeof rawLlm.provider === 'string' && rawLlm.provider.trim() !== '' ? rawLlm.provider.trim() : undefined,

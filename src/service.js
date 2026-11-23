@@ -1,3 +1,4 @@
+import { MemoryGuardError } from './guard.js'
 import { estimateTokens, logicalDateOf } from './util.js'
 
 export const SERVICE_NAME = 'dshMemory'
@@ -114,19 +115,33 @@ export function createPublicService({
     }
 
     const logicalDate = input.logicalDate || getCurrentLogicalDate()
-    const created = await bufferApi.appendCreate({
-      logicalDate,
-      scope: input.scope ?? 'default',
-      sourceType: effectiveSource,
-      target,
-      op: input.op === 'replace' || input.op === 'retire' ? input.op : 'add',
-      section: input.section ?? '其他长期事实',
-      content,
-      supersedesId: input.supersedesId ?? null,
-      anchor: candidateAnchor,
-      pinned: input.pinned === true && !downgraded,
-      producer: typeof input.producer === 'string' && input.producer.trim() !== '' ? input.producer.trim() : 'external-service',
-    })
+    let created
+    try {
+      created = await bufferApi.appendCreate({
+        logicalDate,
+        scope: input.scope ?? 'default',
+        sourceType: effectiveSource,
+        target,
+        op: input.op === 'replace' || input.op === 'retire' ? input.op : 'add',
+        section: input.section ?? '其他长期事实',
+        content,
+        supersedesId: input.supersedesId ?? null,
+        anchor: candidateAnchor,
+        pinned: input.pinned === true && !downgraded,
+        ...(typeof input.expires === 'string' && input.expires.trim() !== '' ? { expires: input.expires.trim() } : {}),
+        producer: typeof input.producer === 'string' && input.producer.trim() !== '' ? input.producer.trim() : 'external-service',
+      })
+    } catch (error) {
+      if (error instanceof MemoryGuardError) {
+        return {
+          ok: false,
+          reason: error.code,
+          message: error.message,
+          details: error.details,
+        }
+      }
+      throw error
+    }
 
     return {
       ok: true,
@@ -134,6 +149,7 @@ export function createPublicService({
       status: created.status,
       sourceType: created.source_type,
       downgraded,
+      ...(created.duplicate ? { duplicate: true, duplicateIn: created.duplicateIn } : {}),
       item: created,
     }
   }

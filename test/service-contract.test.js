@@ -98,7 +98,7 @@ test('public Cordis service dshMemory and dsh-memory/day-rolled-over contract wo
   assert.equal(svc.contractVersion, 1)
   assert.equal(svc.serviceName, 'dshMemory')
   assert.equal(svc.getCurrentLogicalDate(), '2026-11-22')
-  assert.equal(registeredTools.size, 11)
+  assert.equal(registeredTools.size, 14)
 
   // 2. Onboarding control via public service
   assert.equal(svc.getOnboardingState().needsOnboarding, true)

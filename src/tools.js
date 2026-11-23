@@ -1,10 +1,40 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { VALID_MEMORY_MODES } from './config.js'
+import { MemoryGuardError } from './guard.js'
+import * as defaultProfileApi from './profile.js'
 import { clipText, logicalDateOf } from './util.js'
 
 const stringOutput = {
   schema: { type: 'string' },
   render: (_args, value) => [{ type: 'text', text: String(value) }],
+}
+
+function formatContextWindowLines(ctxRes, { maxCharsPerMessage = 800, maxTotalChars = 6000 } = {}) {
+  if (!ctxRes?.target) return []
+  const targetIdx = ctxRes.messages.findIndex(m => m.anchor === ctxRes.target.anchor)
+  const orderedIndices = [targetIdx]
+  for (let offset = 1; offset < ctxRes.messages.length; offset += 1) {
+    if (targetIdx - offset >= 0) orderedIndices.push(targetIdx - offset)
+    if (targetIdx + offset < ctxRes.messages.length) orderedIndices.push(targetIdx + offset)
+  }
+
+  const chosen = new Set()
+  let usedChars = 0
+  const formattedByIdx = new Map()
+  for (const idx of orderedIndices) {
+    const row = ctxRes.messages[idx]
+    const prefix = idx === targetIdx ? '>>> ' : '    '
+    const line = `${prefix}[${row.anchor}] (${row.role}) ${clipText(row.text, maxCharsPerMessage)}`
+    if (idx === targetIdx || usedChars + line.length + 1 <= maxTotalChars) {
+      chosen.add(idx)
+      formattedByIdx.set(idx, line)
+      usedChars += line.length + 1
+    }
+  }
+
+  return ctxRes.messages
+    .map((_row, idx) => (chosen.has(idx) ? formattedByIdx.get(idx) : null))
+    .filter(Boolean)
 }
 
 export function createToolsApi({
@@ -19,7 +49,8 @@ export function createToolsApi({
   entityApi,
   onboardingApi,
   briefingApi,
-  profileApi,
+  profileApi = defaultProfileApi,
+  dreamApi,
   clock = { now: () => Date.now() },
 }) {
   function currentLogicalDate() {
@@ -47,6 +78,7 @@ export function createToolsApi({
         dateTo: { type: 'string', description: 'Optional inclusive end date (YYYY-MM-DD).' },
         scope: { type: 'string', description: 'Optional memory scope (default "default").' },
         limit: { type: 'integer', description: 'Maximum hits per source (default 10, max 50).' },
+        contextTurns: { type: 'integer', description: 'Optional number of adjacent turns (0-3, default 0) to expand around each archived match.' },
       },
       output: stringOutput,
       isConcurrencySafe: () => true,
@@ -57,6 +89,7 @@ export function createToolsApi({
         }
         const scope = args.scope?.trim() || sessionScopeOf(sessionId)
         const limit = Math.min(Math.max(args.limit ?? 10, 1), 50)
+        const contextTurns = Math.min(Math.max(Number.parseInt(args.contextTurns, 10) || 0, 0), 3)
         const rawQuery = typeof args.query === 'string' ? args.query.trim() : ''
         const dateFrom = args.dateFrom?.trim() || undefined
         let dateTo = args.dateTo?.trim() || undefined
@@ -94,12 +127,67 @@ export function createToolsApi({
           )
         }
         if (msgHits.length > 0) {
-          sections.push(
-            '### Archive Matches',
-            ...msgHits.map(hit => `- [${hit.anchor}] (${hit.role}) ${clipText(hit.text, 300)}`),
-          )
+          sections.push('### Archive Matches')
+          if (contextTurns > 0 && typeof store.getMessageContext === 'function') {
+            for (const hit of msgHits) {
+              const ctxRes = store.getMessageContext({
+                anchor: hit.anchor,
+                before: contextTurns,
+                after: contextTurns,
+                scope,
+              })
+              if (!ctxRes) {
+                sections.push(`- [${hit.anchor}] (${hit.role}) ${clipText(hit.text, 300)}`)
+              } else {
+                sections.push(...formatContextWindowLines(ctxRes, { maxCharsPerMessage: 300, maxTotalChars: 1600 }))
+              }
+            }
+          } else {
+            sections.push(...msgHits.map(hit => `- [${hit.anchor}] (${hit.role}) ${clipText(hit.text, 300)}`))
+          }
         }
         return sections.join('\n')
+      },
+    }),
+
+    defineTool({
+      name: 'memory_read_context',
+      description: 'Expand surrounding archived conversation turns (before and after) around a specific chat:// anchor using row-window queries.',
+      parameters: {
+        anchor: { type: 'string', required: true, description: 'Exact chat://YYYY-MM-DD#session#seq anchor.' },
+        before: { type: 'integer', description: 'Number of preceding turns to fetch (default 2, max 20).' },
+        after: { type: 'integer', description: 'Number of following turns to fetch (default 2, max 20).' },
+        maxCharsPerMessage: { type: 'integer', description: 'Optional max chars per message (default 800).' },
+        maxTotalChars: { type: 'integer', description: 'Optional max total chars across window (default 6000).' },
+      },
+      output: stringOutput,
+      isConcurrencySafe: () => true,
+      async execute(args, exec) {
+        const sessionId = exec.agent?.id
+        if (effectiveModeOf(sessionId) === 'off') {
+          return 'Memory is disabled (mode=off) for this session.'
+        }
+        const scope = sessionScopeOf(sessionId)
+        const anchor = args.anchor?.trim()
+        if (!anchor) {
+          return 'Please provide a valid chat:// anchor.'
+        }
+        const ctxRes = store.getMessageContext({
+          anchor,
+          before: args.before ?? 2,
+          after: args.after ?? 2,
+          scope,
+        })
+        if (!ctxRes) {
+          return `No archived message found for anchor "${anchor}".`
+        }
+        const maxPerMsg = Math.min(Math.max(Number.parseInt(args.maxCharsPerMessage, 10) || 800, 100), 4000)
+        const maxTotal = Math.min(Math.max(Number.parseInt(args.maxTotalChars, 10) || 6000, 300), 24000)
+        const lines = formatContextWindowLines(ctxRes, { maxCharsPerMessage: maxPerMsg, maxTotalChars: maxTotal })
+        return [
+          `Context around ${ctxRes.target.anchor} (session=${ctxRes.target.session_id}, before=${ctxRes.before.length}, after=${ctxRes.after.length}):`,
+          ...lines,
+        ].join('\n')
       },
     }),
 
@@ -140,6 +228,7 @@ export function createToolsApi({
         section: { type: 'string', description: 'Target section name in PROFILE.md (e.g. "沟通与工作偏好").' },
         op: { type: 'string', enum: ['add', 'replace', 'retire'], description: 'Operation type (default "add").' },
         supersedesId: { type: 'string', description: 'Existing PROFILE entry id to replace or retire.' },
+        expires: { type: 'string', description: 'Optional expiration date (YYYY-MM-DD) for phase-limited facts.' },
         pinned: { type: 'boolean', description: 'Whether to mark as pinned (protected from automated Dream deletion).' },
       },
       output: stringOutput,
@@ -164,18 +253,31 @@ export function createToolsApi({
         }
 
         const logicalDate = currentLogicalDate()
-        const created = await bufferApi.appendCreate({
-          logicalDate,
-          scope,
-          sourceType: effectiveSourceType,
-          target: args.target ?? 'profile',
-          op: args.op ?? 'add',
-          section: args.section ?? '其他长期事实',
-          content: args.content,
-          supersedesId: args.supersedesId ?? null,
-          anchor: boundAnchor,
-          pinned: args.pinned === true,
-        })
+        let created
+        try {
+          created = await bufferApi.appendCreate({
+            logicalDate,
+            scope,
+            sourceType: effectiveSourceType,
+            target: args.target ?? 'profile',
+            op: args.op ?? 'add',
+            section: args.section ?? '其他长期事实',
+            content: args.content,
+            supersedesId: args.supersedesId ?? null,
+            expires: args.expires?.trim() || undefined,
+            anchor: boundAnchor,
+            pinned: args.pinned === true,
+          })
+        } catch (error) {
+          if (error instanceof MemoryGuardError) {
+            return `Refused to buffer (${error.code}): ${error.message}`
+          }
+          throw error
+        }
+
+        if (created.duplicate) {
+          return `Skipped duplicate item: already exists as ${created.id} (${created.duplicateIn}).`
+        }
 
         return `Buffered item ${created.id} for ${logicalDate} (target=${created.target}, sourceType=${created.source_type}, anchor=${created.anchor ?? 'none'})${downgradeNote}.`
       },
@@ -338,12 +440,13 @@ export function createToolsApi({
 
     defineTool({
       name: 'memory_forget',
-      description: 'Actively forget memories requested by the user: permanently deletes matching messages from archive and FTS5, rejects matching buffer items, redacts matching lines in daily journals, entities, and history index, and invalidates snapshots.',
+      description: 'Actively forget memories requested by the user: permanently deletes matching messages from archive and FTS5, rejects matching buffer items, redacts matching lines in daily journals, entities, and history index, removes matching entries from PROFILE.md and retired.jsonl, and invalidates snapshots.',
       parameters: {
         anchor: { type: 'string', description: 'Exact chat:// anchor to forget.' },
         date: { type: 'string', description: 'Optional logical date filter (YYYY-MM-DD).' },
         keyword: { type: 'string', description: 'Optional substring/keyword to forget.' },
         sessionId: { type: 'string', description: 'Optional session id filter.' },
+        force: { type: 'boolean', description: 'If true, also remove matched pinned entries in PROFILE.md.' },
       },
       output: stringOutput,
       async execute(args, exec) {
@@ -353,33 +456,46 @@ export function createToolsApi({
         const callerSessionId = exec.agent?.id
         const scope = sessionScopeOf(callerSessionId)
         const todayDate = currentLogicalDate()
+        const cleanAnchor = args.anchor?.trim() || undefined
+        const cleanDate = args.date?.trim() || undefined
+        const cleanKeyword = args.keyword?.trim() || undefined
+        const cleanSessionId = args.sessionId?.trim() || undefined
 
         const deleted = store.deleteMessages({
-          anchor: args.anchor?.trim() || undefined,
-          date: args.date?.trim() || undefined,
-          keyword: args.keyword?.trim() || undefined,
-          sessionId: args.sessionId?.trim() || undefined,
+          anchor: cleanAnchor,
+          date: cleanDate,
+          keyword: cleanKeyword,
+          sessionId: cleanSessionId,
           scope,
         })
 
-        const anchorsToReject = [...deleted.deletedAnchors, ...(args.anchor ? [args.anchor.trim()] : [])]
-        const rejectedBufferIds = await bufferApi.rejectByAnchors(anchorsToReject, {
-          by: 'user',
-          reason: 'memory_forget',
-        })
+        const anchorsToReject = [...deleted.deletedAnchors, ...(cleanAnchor ? [cleanAnchor] : [])]
+        const rejectedBufferIds = typeof bufferApi.rejectForForget === 'function'
+          ? await bufferApi.rejectForForget({
+            anchors: anchorsToReject,
+            keyword: cleanKeyword,
+            date: cleanDate,
+            scope,
+            by: 'user',
+            reason: 'memory_forget',
+          })
+          : await bufferApi.rejectByAnchors(anchorsToReject, {
+            by: 'user',
+            reason: 'memory_forget',
+          })
 
         const redactedJournals = await journalApi.redactJournalForForget(config.home, {
-          date: args.date?.trim() || undefined,
+          date: cleanDate,
           anchors: anchorsToReject,
-          keyword: args.keyword?.trim() || undefined,
-          sessionId: args.sessionId?.trim() || undefined,
+          keyword: cleanKeyword,
+          sessionId: cleanSessionId,
           todayDate,
         })
 
         const redactedEntities = entityApi
           ? await entityApi.redactEntitiesForForget(config.home, {
             anchors: anchorsToReject,
-            keyword: args.keyword?.trim() || undefined,
+            keyword: cleanKeyword,
             todayDate,
           })
           : { updatedEntities: [] }
@@ -387,11 +503,27 @@ export function createToolsApi({
         const redactedHistory = historyApi
           ? await historyApi.redactHistoryForForget({
             anchors: anchorsToReject,
-            keyword: args.keyword?.trim() || undefined,
+            keyword: cleanKeyword,
             affectedDates: [...new Set([...deleted.affectedDates, ...redactedJournals])],
             todayDate,
           })
           : { updatedMonths: [] }
+
+        const redactedProfile = profileApi?.redactProfileForForget
+          ? await profileApi.redactProfileForForget(config.home, {
+            anchors: anchorsToReject,
+            keyword: cleanKeyword,
+            force: args.force === true,
+          })
+          : { removedIds: [], skippedPinnedIds: [], changed: false }
+
+        const purgedRetired = profileApi?.purgeRetiredForForget
+          ? await profileApi.purgeRetiredForForget(config.home, {
+            anchors: anchorsToReject,
+            keyword: cleanKeyword,
+            entryIds: redactedProfile.removedIds,
+          })
+          : { purgedCount: 0 }
 
         contextApi.invalidateSnapshots()
 
@@ -401,6 +533,8 @@ export function createToolsApi({
           `Redacted ${redactedJournals.length} daily journal(s)${redactedJournals.length > 0 ? `: ${redactedJournals.join(', ')}` : ''}.`,
           `Redacted ${redactedEntities.updatedEntities.length} entity card(s)${redactedEntities.updatedEntities.length > 0 ? `: ${redactedEntities.updatedEntities.join(', ')}` : ''}.`,
           `Redacted ${redactedHistory.updatedMonths.length} history month(s)${redactedHistory.updatedMonths.length > 0 ? `: ${redactedHistory.updatedMonths.join(', ')}` : ''}.`,
+          `Removed ${redactedProfile.removedIds.length} profile entry(s)${redactedProfile.skippedPinnedIds.length > 0 ? ` (skipped pinned: ${redactedProfile.skippedPinnedIds.join(', ')}; pass force=true to delete)` : ''}.`,
+          `Purged ${purgedRetired.purgedCount} retired record(s).`,
         ].join(' ')
       },
     }),
@@ -737,6 +871,85 @@ export function createToolsApi({
           ...(res.settlement ? [`Immediate settlement committed ${res.settlement.committedCount} item(s).`] : []),
           ...(warnings.length > 0 ? [`Warnings: ${warnings.map(w => `${w.id}:${w.reason}`).join(', ')}`] : []),
         ].join(' ')
+      },
+    }),
+
+    defineTool({
+      name: 'memory_dream_now',
+      description: 'Manually trigger M4 Dream background consolidation (rule + optional LLM pass) to queue dedup, expiry, or conflict proposals into buffer without silently mutating PROFILE.md.',
+      parameters: {
+        dryRun: { type: 'boolean', description: 'If true, preview proposals without writing to buffer or advancing Dream watermark.' },
+        useLlm: { type: 'boolean', description: 'Whether to run semantic LLM pass alongside rules (default true).' },
+        scope: { type: 'string', description: 'Optional memory scope (default current session scope).' },
+      },
+      output: stringOutput,
+      async execute(args, exec) {
+        const sessionId = exec.agent?.id
+        const mode = effectiveModeOf(sessionId)
+        if (mode === 'off') {
+          return 'Memory is disabled (mode=off) for this session.'
+        }
+        if (!dreamApi) {
+          return 'Dream consolidation module is not available.'
+        }
+        const dryRun = args.dryRun === true
+        if (!dryRun && mode !== 'full') {
+          return `Cannot write Dream proposals while session mode is "${mode}".`
+        }
+        const scope = args.scope?.trim() || sessionScopeOf(sessionId)
+        const res = await dreamApi.runDream({
+          scope,
+          dryRun,
+          useLlm: args.useLlm !== false,
+          force: true,
+          signal: exec.signal,
+        })
+        if (res.skipped) {
+          return `Dream skipped: ${res.reason}.`
+        }
+        const header = [
+          `Dream ${dryRun ? 'dry-run' : 'completed'} for ${res.todayDate} (scope=${res.scope}, llm=${res.llmStatus}${res.degraded ? ', degraded/watermark-held' : ''}):`,
+          `Accepted proposals: ${res.proposals.length} (written=${res.writtenProposals.length}, profile cap=${res.maxProfileProposals} across ${res.nonPinnedCount} non-pinned entries).`,
+        ]
+        if (res.proposals.length > 0) {
+          header.push(
+            'Proposals:',
+            ...res.proposals.map(p => `- [${p.channel} | ${p.op} -> ${p.target}${p.targetId ? `:${p.targetId}` : ''}] ${p.content} (${p.reason})`),
+          )
+        }
+        if (res.diagnostics?.oversizedEntities?.length > 0) {
+          header.push(`Oversized entity cards: ${res.diagnostics.oversizedEntities.join(', ')}`)
+        }
+        return header.join('\n')
+      },
+    }),
+
+    defineTool({
+      name: 'memory_rollback',
+      description: 'Roll back a retired or replaced PROFILE.md entry by entryId using append-only retired.jsonl audit history, then invalidate prompt snapshots.',
+      parameters: {
+        entryId: { type: 'string', required: true, description: 'PROFILE.md entry id to restore (e.g. prof_01).' },
+      },
+      output: stringOutput,
+      async execute(args, exec) {
+        const sessionId = exec.agent?.id
+        const mode = effectiveModeOf(sessionId)
+        if (mode !== 'full') {
+          return `Cannot rollback PROFILE.md while session mode is "${mode}".`
+        }
+        const entryId = args.entryId?.trim()
+        if (!entryId) {
+          return 'Please provide entryId to roll back.'
+        }
+        const res = await profileApi.rollbackProfileEntry(config.home, entryId, {
+          maxTokens: config.sections.profile.maxTokens,
+          nowIso: new Date(clock.now()).toISOString(),
+        })
+        if (!res.ok) {
+          return `Rollback failed for "${entryId}": ${res.reason}.`
+        }
+        contextApi?.invalidateSnapshots?.()
+        return `Rolled back profile entry ${res.restoredId}${res.retiredReplacementId ? ` (retired replacement ${res.retiredReplacementId})` : ''}. Estimated PROFILE.md tokens: ${res.estimatedTokens}/${config.sections.profile.maxTokens}.`
       },
     }),
   ]

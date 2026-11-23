@@ -17,7 +17,7 @@
 | **M1** | ✅ 已完成 | 原文档案采集（`user-only` 子会话过滤 + 三态无痕）、空闲切日（日内分块 + 锚点核验）与 6 段式不可变日报、按日追加缓冲区、按 `(session, logical_date)` 冻结前缀 + 持久化动态增量（Compaction 重置）、7 个基础记忆工具（含 `memory_forget`） |
 | **M2** | ✅ 已完成 | 历史记忆层引入 OpenViking L0/L1/L2 渐进披露（无向量单跳派生、`memory_history_browse`）与总览注入；`entities/` 实体档案卡、`target: entity:<名称>` 结算、别名精准触发动态注入与 `memory_entity_manage` |
 | **M3** | ✅ 已完成 | 初始画像冷启动引导（空画像首次加载触发、多端自适应 `show_view` / `ask_user` / `ask_user_question` / 文本问卷、跳过与重填、Prefix Cache 保护）、每日晨报确认体验（昨日亮点 + 批量 `approve`/`reject` + `settleNow`）、轻量纠偏捕获（`source_type: 'correction'` + 真实用户锚点），以及公开 Cordis 服务 `dshMemory` 与标准事件 `dsh-memory/day-rolled-over` |
-| **M4** | 📋 规划中 | Dream 后台异步整理（去重、矛盾确认、`expires` 过期提案与 `retired.jsonl` 回滚）、`memory_read_context` 邻接上下文扩展、写入 `content_hash` 幂等去重与凭据拦截、日结绝对时间与助手承诺增强、`memory_forget` 补清 `PROFILE.md`，以及分环节评测与黄金记忆消融集 |
+| **M4** | ✅ 已完成 | 规则 + LLM 双通道 Dream（无证据不误删、冲突保留 `CONFLICT`、失败不推进水位、`expires` 提案与 `retired.jsonl` 通用回滚）、`memory_read_context` 行窗口邻接扩展、`guard.js` 幂等去重与凭据“只记名不记值”拒写、`memory_forget` 补清 `PROFILE.md`/`retired.jsonl`，以及离线单测 + 在线准确率/Token 消融评测 |
 | **后续（最后实现）** | 📝 已记录 | 写入侧记忆投毒 / 提示注入拦截与红队验收（当前由数据区声明与缓冲确认兜底，最后实现） |
 
 ## 架构目录规划（运行时数据，默认 `$DSH_HOME/daily-memory/`）

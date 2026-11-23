@@ -1,8 +1,8 @@
 # `dsh-memory` 架构设计说明书
 
-> 状态：M1、M2（`#1`）、M3（`#2`：冷启动引导、每日晨报确认、轻量纠偏与公开 Cordis 服务契约）已完成  
+> 状态：M1、M2（`#1`）、M3（`#2`：冷启动引导、每日晨报确认、轻量纠偏与公开 Cordis 服务契约）、M4（`#5`：Dream 后台巩固、`retired.jsonl` 通用回滚、行窗口邻接上下文、写入守卫与 `memory_forget` 8 层收尾）已完成  
 > 仓库：`5quan/dsh-memory`  
-> 参考来源：DeepSeek Super-agent 设计探索（`https://zhuanlan.zhihu.com/p/2099987320443237060`）、`dsh-ctrl` 记忆体系前期探索、OpenViking L0/L1/L2 渐进披露范式、AutoDream 后台整理思想
+> 参考来源：DeepSeek Super-agent 设计探索（`https://zhuanlan.zhihu.com/p/2099987320443237060`）、`dsh-ctrl` 记忆体系前期探索、OpenViking L0/L1/L2 渐进披露范式、AutoDream 后台整理思想、Anthropic *The components of agent memory* / Dreaming & Knowledge Wiki 实践、MemMachine 邻接原文扩展思想
 
 ---
 
@@ -409,32 +409,36 @@ stateDiagram-v2
 
 ### 3.7 Dream 后台整理、检索与治理补强（M4）
 
-参考 Claude Code **AutoDream**（`Orient → Gather → Consolidate → Prune`）四阶段范式，在系统积累数周真实记忆后启用，并同步补强 M4 检索邻接扩展、写入守门、遗忘全闭环与分环节评测：
+参考 Claude Code **AutoDream**（`Orient → Gather → Consolidate → Prune`）四阶段范式、Anthropic *The components of agent memory* / Dreaming & Knowledge Wiki 工程实践及 MemMachine 邻接原文扩展思想，重点强化 M4 的后台克制整理、行窗口邻接检索、写入守门、遗忘全闭环与成本+准确率消融评测：
 
-1. **触发条件**：同时满足“距上次 Dream ≥ 间隔天数（如 7 天）”、“累计新增会话/日报数达阈值”、“当前系统空闲”，支持 `memory_dream_now` 手动触发与文件锁防并发。
-2. **四阶段动作**：
-   - `Orient`：读取 `PROFILE.md`、`journals/` 元数据、`entities/` 与 `retired.jsonl`；
-   - `Gather`：检索近期高频纠偏、长期未用旧事实、同主题重复条目，以及已到期的 `expires` 阶段性条目；
-   - `Consolidate`：提出合并冗余、过期 `retire` 提案（基于可选 `expires: YYYY-MM-DD` 字段）、矛盾检测结果；
-   - `Prune`：修剪超预算内容并按需刷新单跳 L0/L1 索引。
-3. **四条安全边界**：
-   - 绝不修改 `archive.sqlite` 原文与 `journals/YYYY-MM-DD.md`；
-   - 绝不自动修改或删除带 `pinned` 标记的条目；
-   - 涉及删除/修改/过期淘汰/矛盾裁决的提案统一写入 `buffer/YYYY-MM-DD.jsonl`（`source_type: 'dream'`）等用户确认，并将被取代条目备份至 `retired.jsonl`；
-   - 单次变更比例设上限（如 ≤ 20%），支持通过 `memory_rollback` 一键回滚。
+#### 1. Dream 后台异步整理（规则 + LLM 双通道、`expires` 与 `retired.jsonl` 回滚）
+- **调度与水位保护**：挂接在 `rollover` 空闲巡检链路后复用 `isIdleEnough()` 与可注入 `clock`，同时满足距上次成功运行 ≥ `dream.intervalDays`（默认 `7` 天）、累计新增日报 ≥ `dream.minNewJournals`（默认 `3` 份）且系统空闲；配 `dream.lock` 文件锁防并发，并暴露 `memory_dream_now(dryRun?)` 手动触发。`memory_meta` 中 `dream:<scope>` 水位**仅在整轮提案校验并写入成功后推进，中途失败保持原水位下次重跑**（借鉴 Anthropic `dreaming_nightly.py`）。
+- **双通道四阶段（`Orient → Gather → Consolidate → Prune`）**：
+  - **规则层（零 LLM，必跑）**：扫描 `PROFILE.md` 中 `expires <= today` 的到期条目生成 `retire` 提案、检测精确重复、检查 `PROFILE.md` 预算压力与缺失的 `history/` 索引，以及检查 `entities/*.md` 单卡过大或同名重复；
+  - **LLM 语义层（可选，失败降级不崩溃）**：结合 `PROFILE.md`、近期日报精华/纠偏及可选自然语言配置 `dream.instructions`（告知整理目标而非写死僵硬规则）输出结构化 JSON 合并/冲突建议。
+- **克制原则与确定性代码后置核验**：
+  - **无证据则不动（Absence of evidence ≠ 过期）**：绝不因某条旧记忆长期未被提及就自动提议淘汰；仅在命中显式 `expires` 到期、近期出现明确反证或逼近 `2000` token 预算上限时生成 `retire` / `replace` 提案；
+  - **冲突保留 `CONFLICT` + 来源权威分层**：无法定夺的矛盾不瞎猜覆盖，显式附双方来源/日期/锚点生成冲突提案供用户晨报拍板；低权威推断（`extracted` / 日报观察）不得直接覆盖高权威记录（`manual` / `explicit` / `pinned`）；
+  - **防骚扰与冷却期**：对未关闭的同目标 `dream` 提案自动去重；对用户明确 `reject` 过的同目标提案启用冷却期（默认 `dream.rejectCooldownDays: 30` 天内不重复提议）；
+  - **四条安全边界与代码核验**：① 绝不修改 `archive.sqlite` 原文与 `journals/YYYY-MM-DD.md`；② 绝不自动修改或删除带 `pinned` 标记的条目；③ LLM 产出的 JSON 必须经确定性代码核验（目标 `prof_XX` 真实存在、非 `pinned`、通过凭据守门）后以 `source_type: 'dream'` 写入 `buffer/YYYY-MM-DD.jsonl` 等人工确认；④ 单次提案数上限按 `nonPinnedCount === 0 ? 0 : Math.max(1, Math.floor(nonPinnedCount * dream.maxChangeRatio))` 控制（默认 `0.2`），统计数全部以代码真实落盘为准。
+- **`retired.jsonl` 通用备份与 `memory_rollback`**：除 `memory_forget` 主动遗忘外，所有对 `PROFILE.md` 的 `replace` / `retire` 变更（包含 Dream 确认落盘与日常显式覆盖淘汰）均将旧条目追加写入 `retired.jsonl`；`memory_rollback(entryId)` 采用追加留痕语义恢复（若原位已被新条取代，先把现存取代条转存进 `retired.jsonl` 再恢复旧内容），并立即失效 `snapshots/`。
 
-#### 1. 检索上下文邻接扩展（借鉴 MemMachine）
-- 新增 `memory_read_context` 工具：按 `chat://` `anchor` 及 `before` / `after` 从 `archive.sqlite` 按 `(session_id, seq)` 拉取前后相邻轮次完整原文（纯 SQL 窗口查询，零 LLM 开销），并可选为 `memory_search` 增加 `contextTurns` 参数，补齐无向量单条命中被截断、缺乏前提或回复上下文的问题。
+#### 2. 检索上下文邻接扩展（借鉴 MemMachine）
+- 新增 `memory_read_context(anchor, before?, after?)` 工具：解析 `chat://YYYY-MM-DD#<session_id>#<seq>`，在 `archive.sqlite` 按 `(session_id, seq)` 执行前后**行窗口查询**（`seq < targetSeq ORDER BY seq DESC LIMIT before` 与 `seq > targetSeq ORDER BY seq ASC LIMIT after`——避免因未采集工具事件导致 `seq` 不连续而错用 `seq ± N`），零 LLM 开销返回前后 `N` 轮完整语义原文（带单条与总字符上限）；
+- 为 `memory_search` 增加可选 `contextTurns` 参数（默认 `0` 保持兼容，范围 `0..3`），补齐纯无向量单条命中被截断、缺乏对话前提或后续回复的问题。
 
-#### 2. 写入幂等去重、凭据守门与日结 Prompt 增强
-- **入口去重与凭据守门**：在 `buffer.appendCreate` 与 `dshMemory.submitBufferCandidate` 入口增加归一化 `content_hash` 精确幂等去重（同 `scope + target + section` 下在未结算缓冲与既有 `PROFILE.md` 内避免重复堆积），以及纯规则明显密钥/Token/验证码（如 `sk-`、`ghp_`、`Bearer` 等）拦截或脱敏警告；
-- **日结 Prompt 增强**：在 `DIGEST_SYSTEM_PROMPT` 与 `CHUNK_MAP_SYSTEM_PROMPT` 中补充两条约束：① 将相对时间（“昨天 / 下周三 / 上个月”）换算为绝对 ISO 日期；② 将**助手做出的承诺或已执行的关键动作**（借鉴 Mem0 v3）作为一等事实记录。
+#### 3. 写入幂等去重、凭据守门与日结 / Dream Prompt 纪律
+- **统一守门模块 `src/guard.js`**：挂接在 `buffer.appendCreate`（统一覆盖 `memory_buffer_add`、`correction.autoCapture`、`dshMemory.submitBufferCandidate`）与 `onboarding.submit` 直写入口：
+  - **归一化 `content_hash` 精确幂等去重**：对文本做 trim、折叠空白、去尾标点并转小写后计算哈希，在同一 `scope + target + section` 下针对 `op === 'add'` 在未关闭缓冲与现有 `PROFILE.md` 内精确幂等去重；
+  - **高置信凭据守门（“只记名称不记值”）**：拦截明显密钥/Token/验证码（如 `sk-`、`ghp_`、`github_pat_`、`AKIA...`、`xox...`、PEM 私钥头、`Bearer <token>`、显式密码/验证码模式），直接拒写返回 `SECRET_DETECTED`，并明确引导“若凭据存在本身是重要事实，请只记录凭据名称或环境变量名（如 `GITHUB_TOKEN`），不要写入其值”，同时规则避开正常版本号、commit hash 与端口号。
+- **日结与 Dream Prompt 纪律增强**：① 将相对时间（“昨天 / 下周三 / 上个月”）结合当前逻辑日换算为绝对 ISO 日期；② 将**助手做出的明确承诺或已执行的关键外部动作**（Mem0 v3）作为一等事实记录；③ 区分**单次任务措辞 vs 长期规矩**，写法上用当前认知陈述句并剔除第一人称流水账与死胡同猜测；在上下文注入头部同步强化“记忆可能滞后于现实，关键操作前应核实”的陈旧度提示。
 
-#### 3. `memory_forget` 删除传播全闭环
-- 在既有清理（`messages`、`messages_fts`、`buffer/`、`journals/`、`entities/`、`history/`、`snapshots/`）基础上，补齐对 `PROFILE.md` 与 `retired.jsonl` 的联动清理（按被遗忘 `anchors` 匹配 `source` 或按正文 `keyword` 匹配；受 `pinned` 保护的条目默认提示需显式确认），并用单测验证遗忘后所有层级可检索率为 `0`。
+#### 4. `memory_forget` 删除传播全闭环
+- 在既有 7 层清理（`messages`、`messages_fts`、`buffer/`、`journals/`、`entities/`、`history/`、`snapshots/`）基础上，补齐对 `PROFILE.md` 与 `retired.jsonl` 的联动清理：按 `anchor` / `sessionId` / `date` 遗忘时仅清除 `source` 命中 `anchorsToReject` 的画像条目（不误杀同日 `source: manual` 手动条目），按 `keyword` 遗忘时额外匹配正文与元数据；命中 `pinned` 条目默认跳过并在返回中列出受保护 `id`，传 `force: true` 才强删；主动遗忘条目**绝不写入 `retired.jsonl`**，且同步抹除 `retired.jsonl` 中既有匹配项，确保全层级可检索残留率为 `0`。
 
-#### 4. 分环节回归评测与黄金记忆消融
-- 将 M4 回归集拆分为 `add/digest`（抽取/纠偏准确率、伪锚点与凭据拦截率）、`search`（FTS5 召回、邻接扩展、实体触发、遗忘零残留率）与端到端跨月问答（含“以前/现在”时序题与改口纠偏题，对照“无记忆 vs `dsh-memory` vs 直接注入黄金记忆”消融实验，精准区分检索瓶颈与模型推理瓶颈）。
+#### 5. 分环节回归评测与黄金记忆消融（准确率 + Token 成本）
+- **离线确定性评测（零 LLM 费用，纳入 `npm test`）**：覆盖纠偏正则 P/R、凭据守门误报/漏报率、归一化幂等去重、FTS5 召回与行窗口邻接完整率、实体别名触发、`memory_forget` 跨 8 层全链路残留为 `0`、Dream 规则/无证据不动/冷却期/失败不推水位/比例上限/`pinned` 零误伤与 `memory_rollback`；
+- **在线 LLM 三组消融脚本（`eval/run-eval.mjs`，`npm run eval:llm`）**：基于固定跨月问答集（“以前/现在”时序题、改口纠偏题、原话细节题、实体关联题），对比**无记忆 vs `dsh-memory` vs 直接注入黄金记忆**，同表输出**准确率与每题输入 Token（含前缀缓存估算）成本**，精准区分检索瓶颈与推理瓶颈。
 
 ---
 
@@ -456,7 +460,7 @@ stateDiagram-v2
 | `session.surface.replaceGeneration` | `readonly number`（随替换/Compaction 单调递增） | 在 `agent/pre-step` 中比对是否发生 Compaction，触发游标重置 |
 | `ctx.systemPrompt.section(...)` | `{ name, order, interpolate: false, text: (context: AssembleContext) => string }` | 按 `(context.agent?.id, logicalDate)` 读取/生成冻结前缀快照 |
 | `ctx.on('agent/pre-step', ...)` | `async ({ agent, messages, turn, step, signal, modelSelection }, next) => PreStepDecision` | 调用 `await next()` 后在 `decision.kind === 'enter'` 时持久化前置动态增量消息 |
-| `ctx.tools.register(defineTool(...))` | 来自 `@deepseek-ai/dsh-tools` | 注册面向模型的 11 个 M1–M3 记忆工具 |
+| `ctx.tools.register(defineTool(...))` | 来自 `@deepseek-ai/dsh-tools` | 注册面向模型的 14 个 M1–M4 记忆工具 |
 | `ctx.tools.get(name, scope?)` | `@deepseek-ai/dsh-tools` 返回当前作用域可见工具定义 | 在 `agent/pre-step` 中零耦合探测宿主交互能力（`show_view` / `ask_user` / `ask_user_question`） |
 | `ctx.userQuestions?.ask(...)` | `@deepseek-ai/dsh-user-questions` 可选交互服务 | 原版 DSH 中驱动冷启动问卷与晨报多选确认弹窗（无此服务时优雅降级） |
 | `ctx.provide('dshMemory', service)` | `@deepseek-ai/cordis` 服务注册（`apply` 不返回非 Effect 对象） | 向外部插件/上层 Bot 暴露只读查询与缓冲中转服务契约 |
@@ -475,7 +479,7 @@ export function createMemoryRuntime(ctx, config = {}, deps = {}) {
 }
 
 export function apply(ctx, config = {}) {
-  return createMemoryRuntime(ctx, config)
+  createMemoryRuntime(ctx, config)
 }
 ```
 
@@ -509,6 +513,12 @@ export function apply(ctx, config = {}) {
 | `briefing.enabled` | `boolean` | `true` | 是否在每日首次正常交互时推送晨报汇总与待确认记忆 |
 | `correction.autoCapture` | `boolean` | `true` | 是否启用轻量规则自动捕获用户纠偏写入当日缓冲区 |
 | `correction.defaultSection` | `string` | `'长期规矩与边界'` | 自动捕获纠偏条目的默认 `PROFILE.md` 归属分节 |
+| `dream.enabled` | `boolean` | `true` | 是否在空闲巡检后按周期触发 M4 Dream 后台整理 |
+| `dream.intervalDays` | `number` | `7` | Dream 自动触发所需距上次成功运行的最小间隔天数 |
+| `dream.minNewJournals` | `number` | `3` | Dream 自动触发所需累计新增日报数量阈值 |
+| `dream.maxChangeRatio` | `number` | `0.2` | 单次 Dream 对非 `pinned` 画像条目的最大提案变更比例（保底至少 `1` 条，`0` 条非锁定条目时为 `0`） |
+| `dream.rejectCooldownDays` | `number` | `30` | 用户 `reject` 某目标 Dream 提案后的免重提冷却天数 |
+| `dream.instructions` | `string` | `''` | 可选自然语言记忆整理偏好（告知 Dream 关注重点而非写死硬规则） |
 | `llm.provider` | `string \| undefined` | `undefined` | 日结/Dream 模型提供方覆盖 |
 | `llm.model` | `string \| undefined` | `undefined` | 日结/Dream 模型 ID 覆盖（可指定轻量模型） |
 
@@ -518,20 +528,20 @@ export function apply(ctx, config = {}) {
 
 | 阶段 | 工具名 | 职责 | 关键参数 |
 |---|---|---|---|
-| **M1** | `memory_search` | 在 `archive.sqlite`（FTS5 `trigram` + 短词 `LIKE`，多词支持 `AND` 优先与 `OR` 降级排序）与 `journals/*.md` 中检索原文与历史记录，省略 `query` 时按日期浏览近期归档，返回带 `chat://YYYY-MM-DD#<session>#<seq>` 锚点的片段 | `query?`, `dateFrom?`, `dateTo?`, `scope?`, `limit?` |
+| **M1** | `memory_search` | 在 `archive.sqlite`（FTS5 `trigram` + 短词 `LIKE`，多词支持 `AND` 优先与 `OR` 降级排序）与 `journals/*.md` 中检索原文与历史记录，省略 `query` 时按日期浏览近期归档，返回带 `chat://YYYY-MM-DD#<session>#<seq>` 锚点的片段（M4 支持按 `contextTurns` 附带邻接轮次） | `query?`, `dateFrom?`, `dateTo?`, `scope?`, `limit?`, `contextTurns? (M4)` |
 | **M1** | `memory_journal_read` | 按日期读取某天完整日报，或列出已有日报日期列表 | `date?`（缺省则返回可用日期列表） |
 | **M1** | `memory_buffer_add` | 将记忆要点追加到当日缓冲区；插件自动从当前会话绑定真实用户 `anchor`，绝不直接改 `PROFILE.md` | `content`, `sourceType`, `target?`, `section?`, `pinned?` |
 | **M1** | `memory_buffer_manage` | 查看、筛选、通过（`approve`）或剔除（`reject`）当前缓冲区内的待处理记忆条目，支持可选 `settleNow: true` 立即结算 | `action` (`list` \| `approve` \| `reject`), `ids?`, `settleNow?` |
 | **M1** | `memory_mode_set` | 切换当前会话或全局默认的无痕模式（`full` / `read-only` / `off`） | `mode`, `scope?` (`session` \| `global`) |
 | **M1** | `memory_digest_now` | 手动触发指定逻辑日（默认昨天，支持今天预览或显式重建）的日结生成 | `date?`, `force?` |
-| **M1** | `memory_forget` | 按用户要求主动遗忘：物理删除匹配原文与 FTS 索引、作废相关缓冲条目、给对应日报条目打 `[已按用户要求遗忘]` 标记并失效快照 | `anchor?`, `date?`, `keyword?`, `sessionId?` |
+| **M1** | `memory_forget` | 按用户要求主动遗忘：物理删除匹配原文与 FTS 索引、作废相关缓冲条目、给日报/实体/历史打 `[已按用户要求遗忘]` 标记、清理 `PROFILE.md` 与 `retired.jsonl`（M4，默认保护 `pinned` 除非传 `force: true`）并失效快照 | `anchor?`, `date?`, `keyword?`, `sessionId?`, `force? (M4)` |
 | **M2** | `memory_history_browse` | 浏览 `history/` 的 L0 `.abstract.md` / L1 `.overview.md`、重建单跳索引并引导下钻 L2 日报 | `action` (`list` \| `read` \| `rebuild`), `month?`, `level?` |
 | **M2** | `memory_entity_manage` | 列出、读取、增改或删除 `entities/` 实体档案卡及其 `aliases` 触发词 | `action` (`list` \| `read` \| `upsert` \| `delete`), `name?`, `type?`, `aliases?`, `content?`, `op?`, `supersedesId?`, `pinned?`, `force?` |
 | **M3** | `memory_onboarding` | 查询冷启动状态、触发交互问卷（`prompt`）、提交初始画像（`submit`）、跳过（`skip`）或重填（`reset`） | `action` (`status` \| `prompt` \| `submit` \| `skip` \| `reset`), `identity?`, `preferences?`, `rules?`, `entities?`, `entries?`, `writeMode?`, `forceDirect?` |
 | **M3** | `memory_briefing` | 读取每日晨报摘要（昨日亮点 + 待确认缓冲）、批量或交互确认（`confirm` / `settleNow`）或忽略当日晨报（`dismiss`） | `action` (`get` \| `confirm` \| `dismiss`), `date?`, `approveIds?`, `rejectIds?`, `settleNow?`, `interactive?` |
-| **M4** | `memory_read_context` | 按 `chat://` 锚点展开前后相邻 N 轮完整对话原文（MemMachine 邻接扩展），补齐无向量检索碎片上下文 | `anchor`, `before?`, `after?` |
-| **M4** | `memory_dream_now` | 手动触发一次后台整理提案（生成合并/冲突/过期建议到缓冲区） | `dryRun?` |
-| **M4** | `memory_rollback` | 回滚某次 `PROFILE.md` 变更（从 `retired.jsonl` 恢复） | `entryId` |
+| **M4** | `memory_read_context` | 按 `chat://` 锚点在 `archive.sqlite` 按 `(session_id, seq)` 行窗口展开前后相邻 N 轮完整对话原文（MemMachine 邻接扩展） | `anchor`, `before?`, `after?` |
+| **M4** | `memory_dream_now` | 手动触发一次规则 + LLM 双通道后台整理提案（生成合并/冲突/`expires` 到期建议进缓冲区，失败不推进水位） | `dryRun?` |
+| **M4** | `memory_rollback` | 基于 `retired.jsonl` 追加留痕回滚某次 `PROFILE.md` 变更并立即失效快照 | `entryId` |
 
 ---
 
@@ -544,7 +554,7 @@ export function apply(ctx, config = {}) {
 | **M1（核心闭环）** | 时间轴基础 + 缓冲 + 缓存冻结 + 遗忘与无痕 | 1. 存储底座（明确主存储与可重建索引边界）与 `session/event` 采集（`subagentPolicy: 'user-only'`、`isAppendSurfaceEvent`、三态无痕）<br>2. 可注入 `clock` 的空闲切日状态机 + 日内分块 Map-Reduce + 锚点核验 + 6 段式不可变日报<br>3. 按日轮转追加式缓冲区 `buffer/YYYY-MM-DD.jsonl`（含 `note` 日结归档、防冒用 `explicit`、超 2k 拒绝自动落盘）<br>4. 按 `(session_id, logical_date)` 冻结的前缀（含绝对日期与确定性裁剪）+ `agent/pre-step` 持久化动态增量（含 `replaceGeneration` 重置）<br>5. 7 个 M1 工具（含 `memory_forget`）+ 单元测试 + `bot-dev` 实机挂载 | 1. 单测用可控 `clock` 覆盖跨天快照刷新、切日边界、幂等/补结、日内分块、伪锚点剔除、缓冲区并发追加、FTS5 中英文检索、Compaction 重置、`memory_forget` 与无痕模式<br>2. 实机 `3085` 端口加载 `dsh-memory`（`ds-bot` 配 `memory: false`）正常对话、检索、手动日结与遗忘 |
 | **M2（OpenViking 历史层 + 实体起步）** | 跨月历史不断层 + 人/事卡片 | 1. 由 `journals/*.md` 单跳生成 `history/.abstract.md` 与 `history/YYYY-MM/.overview.md` 并启用 `sections.historyOverview`<br>2. `memory_history_browse` L0/L1/L2 渐进下钻工具<br>3. `entities/` 实体卡与别名命中动态增量注入 | 数月历史仅用 <= 1k tokens 常驻总览即可下钻回查任意月日报；提及人/项目别名时自动动态注入实体卡而不击穿前缀缓存 |
 | **M3（冷启动引导、每日确认与服务契约）** | 冷启动建档 + 低摩擦把关 + 单向开放契约 | 1. 初始画像冷启动引导（首次空画像时发简短问卷或 `show_view` / `ask_user_question` 交互弹窗采集基础画像，支持跳过）<br>2. 晨报汇总摘要（昨日日报亮点 + `buffer/` 待确认列表）与低摩擦批量勾选确认<br>3. 轻量纠偏捕获（`source_type: 'correction'` + 真实用户 `anchor`）<br>4. 公开 Cordis 服务与标准事件契约（供 `dsh-ctrl` 等上层 Bot 单向绑定，保持 `dsh-memory` 零 `ds-bot` 依赖） | 首次启用即可快速建立初始画像；每天首次交互可用极低成本完成“记忆勾选确认 + 纠偏入库”；原版 DSH 独立可用，上层 Bot 可通过公开契约零侵入联动 |
-| **M4（Dream 后台整理、检索与治理补强）** | 跨月自维护、邻接检索与治理闭环 | 1. 低频后台 Dream 四阶段任务（`Orient -> Gather -> Consolidate -> Prune`）与 `expires` 有效期 `retire` 提案、`retired.jsonl` 备份及 `memory_rollback` 回滚能力<br>2. `memory_read_context`（及可选 `memory_search.contextTurns`）按锚点展开相邻轮次完整原文<br>3. `buffer` 入口 `content_hash` 精确幂等去重、明显密钥/Token/验证码拦截，以及日结 Prompt 增强（相对时间绝对化 + 助手承诺一等记录）<br>4. `memory_forget` 补齐 `PROFILE.md` / `retired.jsonl` 删除传播闭环<br>5. 分环节回归评测（`add`/`search`/遗忘零残留）与黄金记忆消融对比 | 长期运行无重复矛盾条目、`pinned` 零误删、可审计回滚；检索缺上下文显著改善；凭据不误写、遗忘全层级残留为 `0`；消融集验证跨月与时序准确率稳定达标 |
+| **M4（Dream 后台整理、检索与治理补强）** | 跨月克制自维护、行窗口邻接检索与成本+准确率消融 | 1. 规则 + LLM 双通道 Dream 后台整理（`dream.lock` 防并发、失败不推进 `dream:<scope>` 水位、无证据不误删、冲突标 `CONFLICT` 且低权不覆高权、`rejectCooldownDays` 冷却期、`expires` 过期提案、`dream.instructions` 可定制），全非遗忘变更落 `retired.jsonl` 并支持 `memory_rollback` 追加回滚<br>2. `memory_read_context` 与 `memory_search.contextTurns`（按 `(session_id, seq)` 行窗口展开相邻轮次原文）<br>3. `guard.js` 入口归一化 `content_hash` 幂等去重与高置信凭据“只记名不记值”直接拒写，日结/Dream Prompt 强化绝对日期、助手承诺、单次 vs 长期区分与陈旧度提醒<br>4. `memory_forget` 补齐 `PROFILE.md`（仅按锚点/显式关键词清，保护 `pinned`）与 `retired.jsonl` 删除传播闭环<br>5. 离线确定性回归套件（进 `npm test`）+ 在线 LLM 三组消融脚本（无记忆 vs `dsh-memory` vs 黄金记忆，输出准确率 + Token 成本） | `pinned` 零误删、冷却期与比例上限生效、失败重跑不漏日志；行窗口邻接完整；凭据零落库且误报可控；遗忘跨 8 层残留为 `0`；消融实验量化验证准确率与 Token 成本收益 |
 | **后续（最后实现）** | 写入安全加固（暂不纳入 M4） | 写入侧记忆投毒 / 提示注入拦截（规则/分类检测“忽略规则”等篡改指令并强制降级）与红队用例验收（当前仅作设计登记，待 M4 后最后实施） | 红队记忆投毒用例写入阻断或降级隔离，误报不干扰正常偏好与工作规则记录 |
 
 ### 5.2 本地开发与红线约束

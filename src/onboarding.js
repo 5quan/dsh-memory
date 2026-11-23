@@ -1,3 +1,4 @@
+import { checkDuplicateContent, detectSecret } from './guard.js'
 import { clipText, estimateTokens, logicalDateOf } from './util.js'
 
 export const ONBOARDING_DIMENSIONS = [
@@ -258,14 +259,44 @@ export function createOnboardingApi({
       return { ok: false, reason: 'EMPTY_ONBOARDING_INPUT' }
     }
 
+    for (const item of profileItems) {
+      const secret = detectSecret(item.content)
+      if (secret.detected) {
+        return { ok: false, reason: secret.code, kind: secret.kind, message: secret.message }
+      }
+    }
+    for (const ent of entityItems) {
+      const secret = detectSecret(`${ent.name} ${ent.content}`)
+      if (secret.detected) {
+        return { ok: false, reason: secret.code, kind: secret.kind, message: secret.message }
+      }
+    }
+
     const logicalDate = currentLogicalDate()
     const maxTokens = config.sections.profile.maxTokens
     const currentProfileRaw = profileApi.readProfile(config.home)
+    const currentEntries = profileApi.parseProfileEntries(currentProfileRaw)
     const boundAnchor = sessionId ? (store.getLatestUserOrCardMessage?.(sessionId)?.anchor ?? store.getLatestUserMessage?.(sessionId)?.anchor ?? null) : null
+
+    const uniqueProfileItems = []
+    for (const item of profileItems) {
+      const dup = checkDuplicateContent({
+        content: item.content,
+        scope,
+        target: 'profile',
+        section: item.section,
+        op: 'add',
+        bufferItems: [],
+        profileEntries: [...currentEntries, ...uniqueProfileItems],
+      })
+      if (!dup.duplicate) {
+        uniqueProfileItems.push(item)
+      }
+    }
 
     const dryRun = profileApi.previewProfileBatch(
       currentProfileRaw,
-      profileItems.map(item => ({
+      uniqueProfileItems.map(item => ({
         op: 'add',
         section: item.section,
         content: item.content,
@@ -298,10 +329,10 @@ export function createOnboardingApi({
     const bufferedIds = []
 
     if (resolvedMode === 'direct') {
-      if (profileItems.length > 0) {
+      if (uniqueProfileItems.length > 0) {
         const applied = await profileApi.applyProfileBatch(
           config.home,
-          profileItems.map(item => ({
+          uniqueProfileItems.map(item => ({
             op: 'add',
             section: item.section,
             content: item.content,
@@ -332,11 +363,11 @@ export function createOnboardingApi({
         }
       }
 
-      if (profileItems.length > 0) {
+      if (uniqueProfileItems.length > 0) {
         contextApi?.invalidateSnapshots?.()
       }
     } else {
-      for (const item of profileItems) {
+      for (const item of uniqueProfileItems) {
         const created = await bufferApi.appendCreate({
           logicalDate,
           scope,
@@ -349,16 +380,18 @@ export function createOnboardingApi({
           pinned: item.pinned,
           producer: 'onboarding',
         })
-        if (!boundAnchor) {
-          await bufferApi.appendStatus({
-            id: created.id,
-            logicalDate,
-            status: 'approved',
-            by: 'user',
-            reason: 'onboarding submission without session message anchor',
-          })
+        if (!created.duplicate) {
+          if (!boundAnchor) {
+            await bufferApi.appendStatus({
+              id: created.id,
+              logicalDate,
+              status: 'approved',
+              by: 'user',
+              reason: 'onboarding submission without session message anchor',
+            })
+          }
+          bufferedIds.push(created.id)
         }
-        bufferedIds.push(created.id)
       }
 
       for (const ent of entityItems) {
@@ -382,16 +415,18 @@ export function createOnboardingApi({
           pinned: ent.pinned,
           producer: 'onboarding',
         })
-        if (!boundAnchor) {
-          await bufferApi.appendStatus({
-            id: created.id,
-            logicalDate,
-            status: 'approved',
-            by: 'user',
-            reason: 'onboarding entity submission without session message anchor',
-          })
+        if (!created.duplicate) {
+          if (!boundAnchor) {
+            await bufferApi.appendStatus({
+              id: created.id,
+              logicalDate,
+              status: 'approved',
+              by: 'user',
+              reason: 'onboarding entity submission without session message anchor',
+            })
+          }
+          bufferedIds.push(created.id)
         }
-        bufferedIds.push(created.id)
       }
     }
 

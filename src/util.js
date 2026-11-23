@@ -89,6 +89,17 @@ export function anchorOf(logicalDate, sessionId, seq) {
   return `chat://${logicalDate}#${sessionId}#${seq}`
 }
 
+export function parseAnchor(anchor) {
+  const clean = String(anchor ?? '').trim()
+  const match = /^chat:\/\/(\d{4}-\d{2}-\d{2})#(.+)#(\d+)$/.exec(clean)
+  if (!match) return null
+  return {
+    logicalDate: match[1],
+    sessionId: match[2],
+    seq: Number.parseInt(match[3], 10),
+  }
+}
+
 export function clipText(text, maxChars = 400) {
   const input = String(text ?? '')
   if (input.length <= maxChars) return input

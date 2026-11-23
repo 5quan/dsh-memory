@@ -10,6 +10,7 @@ import { createDigestApi } from './src/digest.js'
 import { createOnboardingApi } from './src/onboarding.js'
 import { createBriefingApi } from './src/briefing.js'
 import { createRolloverApi } from './src/rollover.js'
+import { createDreamApi } from './src/dream.js'
 import { createIngestApi } from './src/ingest.js'
 import { createContextApi } from './src/context.js'
 import { createToolsApi } from './src/tools.js'
@@ -30,12 +31,24 @@ export function createMemoryRuntime(ctx, rawConfig = {}, deps = {}) {
   const store = createMemoryStore(join(config.home, 'archive.sqlite'))
   ctx.effect(() => () => store.close(), 'dsh-memory: close archive.sqlite')
 
-  const bufferApi = createBufferApi({ home: config.home, clock })
+  const bufferApi = createBufferApi({ home: config.home, profileApi, clock })
   const historyApi = createHistoryApi({
     ctx,
     config,
     store,
     journalApi,
+    warn,
+  })
+  const dreamApi = createDreamApi({
+    ctx,
+    config,
+    store,
+    profileApi,
+    journalApi,
+    bufferApi,
+    entityApi,
+    historyApi,
+    clock,
     warn,
   })
   const digestApi = createDigestApi({
@@ -102,6 +115,7 @@ export function createMemoryRuntime(ctx, rawConfig = {}, deps = {}) {
     contextApi,
     journalApi,
     bufferApi,
+    dreamApi,
     clock,
     onRollover: deps.onRollover,
     warn,
@@ -128,6 +142,7 @@ export function createMemoryRuntime(ctx, rawConfig = {}, deps = {}) {
     onboardingApi,
     briefingApi,
     profileApi,
+    dreamApi,
     clock,
   })
   const publicService = createPublicService({
@@ -172,6 +187,7 @@ export function createMemoryRuntime(ctx, rawConfig = {}, deps = {}) {
     historyApi,
     bufferApi,
     digestApi,
+    dreamApi,
     onboardingApi,
     briefingApi,
     rolloverApi,
