@@ -107,7 +107,7 @@ function createE2eHarness(t, clock) {
   return { home, rt, tools, promptSections, emitSessionEvent, runTool }
 }
 
-test('E2E workflow across all 11 M1+M2+M3 tools including onboarding, briefing, correction, buffer, digest, history, entities, search, mode switch, and forget', async (t) => {
+test('E2E workflow across all 14 M1-M4 tools including context expansion, guard, dream, rollback, onboarding, briefing, correction, buffer, digest, history, entities, search, mode switch, and forget', async (t) => {
   let nowMs = Date.parse('2026-11-21T16:00:00+08:00')
   const clock = { now: () => nowMs }
   const { rt, tools, emitSessionEvent, runTool } = createE2eHarness(t, clock)
@@ -117,12 +117,15 @@ test('E2E workflow across all 11 M1+M2+M3 tools including onboarding, briefing, 
     'memory_buffer_add',
     'memory_buffer_manage',
     'memory_digest_now',
+    'memory_dream_now',
     'memory_entity_manage',
     'memory_forget',
     'memory_history_browse',
     'memory_journal_read',
     'memory_mode_set',
     'memory_onboarding',
+    'memory_read_context',
+    'memory_rollback',
     'memory_search',
   ])
 
@@ -280,4 +283,56 @@ test('E2E workflow across all 11 M1+M2+M3 tools including onboarding, briefing, 
   assert.equal(briefingConfirm.includes('approved=1'), true)
   assert.equal(briefingConfirm.includes('Immediate settlement committed'), true)
   assert.equal(rt.profileApi.readProfile(rt.config.home).includes('以后一律先运行测试再总结'), true)
+
+  // 8. M4 workflow: adjacent context expansion, guard secret refusal, Dream dry-run & retire, and rollback
+  emitSessionEvent(m3Session, {
+    type: 'user/message',
+    seq: 4,
+    time: nowMs + 3000,
+    surfaceOp: 'append',
+    data: { id: 'u4', role: 'user', content: [{ type: 'text', text: '相邻上下文目标消息：确认发版窗口在周三。' }], source: { kind: 'user' } },
+  })
+  emitSessionEvent(m3Session, {
+    type: 'assistant/message',
+    seq: 8,
+    time: nowMs + 4000,
+    surfaceOp: 'append',
+    data: { message: { id: 'a4', role: 'assistant', content: [{ type: 'text', text: '已确认周三下午 15:00 发版。' }], source: { kind: 'model' } } },
+  })
+
+  const ctxOut = await runTool('memory_read_context', { anchor: 'chat://2026-11-22#m3-session#4', before: 1, after: 1 }, 'm3-session')
+  assert.equal(ctxOut.includes('以后一律先运行测试再总结'), true)
+  assert.equal(ctxOut.includes('>>> [chat://2026-11-22#m3-session#4]'), true)
+  assert.equal(ctxOut.includes('周三下午 15:00 发版'), true)
+
+  const searchCtxOut = await runTool('memory_search', { query: '发版窗口', contextTurns: 1 }, 'm3-session')
+  assert.equal(searchCtxOut.includes('周三下午 15:00 发版'), true)
+
+  const secretBlocked = await runTool('memory_buffer_add', { content: 'token: sk-proj-abcdef1234567890abcdef', sourceType: 'explicit' }, 'm3-session')
+  assert.equal(secretBlocked.includes('SECRET_DETECTED'), true)
+
+  const addedTemp = await runTool('memory_buffer_add', {
+    content: '本周临时值班规则',
+    sourceType: 'explicit',
+    section: '长期规矩与边界',
+    expires: '2026-11-20',
+  }, 'm3-session')
+  assert.equal(addedTemp.includes('Buffered item'), true)
+  const tempBufId = rt.bufferApi.listItems({ statuses: ['pending'] }).find(i => i.content === '本周临时值班规则').id
+  await runTool('memory_buffer_manage', { action: 'approve', ids: [tempBufId], settleNow: true }, 'm3-session')
+  const tempEntry = rt.profileApi.parseProfileEntries(rt.profileApi.readProfile(rt.config.home)).find(e => e.content === '本周临时值班规则')
+  assert.ok(tempEntry)
+
+  const dreamOut = await runTool('memory_dream_now', { dryRun: false, useLlm: false }, 'm3-session')
+  assert.equal(dreamOut.includes('Dream completed'), true)
+  assert.equal(dreamOut.includes('到期淘汰'), true)
+
+  const dreamItem = rt.bufferApi.listItems({ statuses: ['pending'] }).find(i => i.source_type === 'dream' && i.supersedes_id === tempEntry.id)
+  assert.ok(dreamItem)
+  await runTool('memory_buffer_manage', { action: 'approve', ids: [dreamItem.id], settleNow: true }, 'm3-session')
+  assert.equal(rt.profileApi.readProfile(rt.config.home).includes('本周临时值班规则'), false)
+
+  const rollbackOut = await runTool('memory_rollback', { entryId: tempEntry.id }, 'm3-session')
+  assert.equal(rollbackOut.includes(`Rolled back profile entry ${tempEntry.id}`), true)
+  assert.equal(rt.profileApi.readProfile(rt.config.home).includes('本周临时值班规则'), true)
 })

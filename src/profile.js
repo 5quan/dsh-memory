@@ -1,14 +1,20 @@
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { readFileSync, rmSync } from 'node:fs'
+import { appendFile, mkdir } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
 import { atomicWriteFile, estimateTokens } from './util.js'
 
 export const PROFILE_FILENAME = 'PROFILE.md'
+export const RETIRED_FILENAME = 'retired.jsonl'
 const DEFAULT_HEADER = '# 核心画像（Profile）'
 const DEFAULT_SECTION = '其他长期事实'
 const META_RE = /\s*`\[([^\]]+)\]`\s*$/
 
 export function profilePath(home) {
   return join(home, PROFILE_FILENAME)
+}
+
+export function retiredPath(home) {
+  return join(home, RETIRED_FILENAME)
 }
 
 export function readProfile(home) {
@@ -43,6 +49,7 @@ export function formatProfileMeta(meta) {
   if (meta.added) fields.push(`added: ${meta.added}`)
   if (meta.source) fields.push(`source: ${meta.source}`)
   if (meta.supersedes) fields.push(`supersedes: ${meta.supersedes}`)
+  if (meta.expires) fields.push(`expires: ${meta.expires}`)
   if (meta.pinned) fields.push('pinned')
   return fields.length > 0 ? ` \`[${fields.join('; ')}]\`` : ''
 }
@@ -72,6 +79,8 @@ export function parseProfileEntries(raw) {
       id: meta.id,
       added: meta.added,
       source: meta.source,
+      supersedes: meta.supersedes,
+      expires: meta.expires,
       pinned: meta.pinned === true,
       meta,
       rawLine: line,
@@ -130,6 +139,7 @@ export function planProfileMutation(currentRaw, mutation, { maxTokens = 2000, al
       added: mutation.added || '',
       source: mutation.source || 'manual',
       ...(mutation.supersedes ? { supersedes: mutation.supersedes } : {}),
+      ...(mutation.expires ? { expires: mutation.expires } : {}),
       pinned: mutation.pinned === true,
     }
     const line = `- ${String(mutation.content).trim()}${formatProfileMeta(meta)}`
@@ -169,6 +179,7 @@ export function planProfileMutation(currentRaw, mutation, { maxTokens = 2000, al
       added: mutation.added || target.added || '',
       source: mutation.source || target.source || 'manual',
       supersedes: target.id,
+      ...(mutation.expires ? { expires: mutation.expires } : {}),
       pinned: mutation.pinned === true || target.pinned,
     }
     const nextLines = [...lines]
@@ -189,9 +200,50 @@ export function planProfileMutation(currentRaw, mutation, { maxTokens = 2000, al
   return { ok: false, reason: `UNSUPPORTED_OP:${op}` }
 }
 
+function serializeRetiredEntry(entry) {
+  return {
+    id: entry.id,
+    section: entry.section,
+    content: entry.content,
+    added: entry.added || '',
+    source: entry.source || 'manual',
+    ...(entry.supersedes ? { supersedes: entry.supersedes } : {}),
+    ...(entry.expires ? { expires: entry.expires } : {}),
+    pinned: entry.pinned === true,
+  }
+}
+
+export function readRetiredRecords(home) {
+  let raw = ''
+  try {
+    raw = readFileSync(retiredPath(home), 'utf8')
+  } catch (error) {
+    if (error?.code === 'ENOENT') return []
+    throw error
+  }
+  const records = []
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+    try {
+      const parsed = JSON.parse(trimmed)
+      if (parsed && typeof parsed === 'object') records.push(parsed)
+    } catch {}
+  }
+  return records
+}
+
+export async function appendRetiredRecord(home, record) {
+  const filePath = retiredPath(home)
+  await mkdir(dirname(filePath), { recursive: true })
+  await appendFile(filePath, `${JSON.stringify(record)}\n`, 'utf8')
+  return record
+}
+
 export function previewProfileBatch(currentRaw, mutations, { maxTokens = 2000, allowPinned = false } = {}) {
   let workingRaw = String(currentRaw ?? '')
   const applied = []
+  const archived = []
   for (const mutation of mutations) {
     const planned = planProfileMutation(workingRaw, mutation, { maxTokens, allowPinned })
     if (!planned.ok) {
@@ -199,29 +251,244 @@ export function previewProfileBatch(currentRaw, mutations, { maxTokens = 2000, a
     }
     workingRaw = planned.raw
     applied.push({ id: planned.id, section: mutation.section || DEFAULT_SECTION, content: String(mutation.content ?? '').trim() })
+    if (planned.retired) {
+      archived.push({
+        op: 'retire',
+        replacedBy: null,
+        reason: mutation.reason || 'profile_retire',
+        entry: serializeRetiredEntry(planned.retired),
+      })
+    } else if (planned.replaced) {
+      archived.push({
+        op: 'replace',
+        replacedBy: planned.id,
+        reason: mutation.reason || 'profile_replace',
+        entry: serializeRetiredEntry(planned.replaced),
+      })
+    }
   }
   return {
     ok: true,
     raw: workingRaw,
     applied,
+    archived,
     estimatedTokens: estimateTokens(workingRaw),
   }
 }
 
-export async function applyProfileBatch(home, mutations, { maxTokens = 2000, allowPinned = false } = {}) {
+export async function applyProfileBatch(home, mutations, { maxTokens = 2000, allowPinned = false, recordRetired = true, nowIso } = {}) {
   if (!Array.isArray(mutations) || mutations.length === 0) {
     const raw = readProfile(home)
-    return { ok: true, raw, applied: [], estimatedTokens: estimateTokens(raw) }
+    return { ok: true, raw, applied: [], archived: [], estimatedTokens: estimateTokens(raw) }
   }
   const planned = previewProfileBatch(readProfile(home), mutations, { maxTokens, allowPinned })
   if (!planned.ok) return planned
   await atomicWriteFile(profilePath(home), planned.raw)
+  if (recordRetired && planned.archived.length > 0) {
+    const retiredAt = nowIso || new Date().toISOString()
+    for (const item of planned.archived) {
+      await appendRetiredRecord(home, {
+        event: 'retired',
+        retired_at: retiredAt,
+        reason: item.reason,
+        op: item.op,
+        replaced_by: item.replacedBy,
+        entry: item.entry,
+      })
+    }
+  }
   return planned
 }
 
-export async function applyProfileMutation(home, mutation, { maxTokens = 2000, allowPinned = false } = {}) {
+export async function applyProfileMutation(home, mutation, { maxTokens = 2000, allowPinned = false, recordRetired = true, nowIso } = {}) {
   const planned = planProfileMutation(readProfile(home), mutation, { maxTokens, allowPinned })
   if (!planned.ok) return planned
   await atomicWriteFile(profilePath(home), planned.raw)
+  if (recordRetired && (planned.retired || planned.replaced)) {
+    const oldEntry = planned.retired || planned.replaced
+    const op = planned.retired ? 'retire' : 'replace'
+    await appendRetiredRecord(home, {
+      event: 'retired',
+      retired_at: nowIso || new Date().toISOString(),
+      reason: mutation.reason || (op === 'retire' ? 'profile_retire' : 'profile_replace'),
+      op,
+      replaced_by: planned.retired ? null : planned.id,
+      entry: serializeRetiredEntry(oldEntry),
+    })
+  }
   return planned
+}
+
+export async function rollbackProfileEntry(home, entryId, { maxTokens = 2000, nowIso } = {}) {
+  const cleanId = String(entryId ?? '').trim()
+  if (!cleanId) return { ok: false, reason: 'ENTRY_ID_REQUIRED' }
+
+  const records = readRetiredRecords(home)
+  let targetRecord = null
+  for (let i = records.length - 1; i >= 0; i -= 1) {
+    const rec = records[i]
+    if (rec?.event === 'retired' && rec.entry?.id === cleanId) {
+      targetRecord = rec
+      break
+    }
+  }
+  if (!targetRecord) {
+    return { ok: false, reason: 'RETIRED_ENTRY_NOT_FOUND', entryId: cleanId }
+  }
+
+  const currentRaw = readProfile(home)
+  const entries = parseProfileEntries(currentRaw)
+  if (entries.some(e => e.id === cleanId)) {
+    return { ok: false, reason: 'ENTRY_ALREADY_ACTIVE', entryId: cleanId }
+  }
+
+  // Follow replacement chain if the direct replacement was itself later replaced
+  let activeReplacement = null
+  let cursorId = targetRecord.replaced_by
+  const visited = new Set([cleanId])
+  while (cursorId && !visited.has(cursorId)) {
+    visited.add(cursorId)
+    const active = entries.find(e => e.id === cursorId)
+    if (active) {
+      activeReplacement = active
+      break
+    }
+    const nextRec = [...records].reverse().find(r => r?.event === 'retired' && r.entry?.id === cursorId)
+    cursorId = nextRec?.replaced_by ?? null
+  }
+  if (!activeReplacement) {
+    activeReplacement = entries.find(e => e.supersedes === cleanId) ?? null
+  }
+
+  const oldEntry = targetRecord.entry
+  const restoredLine = `- ${String(oldEntry.content).trim()}${formatProfileMeta(oldEntry)}`
+  let nextRaw = ''
+
+  if (activeReplacement) {
+    const lines = currentRaw.split(/\r?\n/)
+    lines[activeReplacement.lineIndex] = restoredLine
+    nextRaw = `${lines.join('\n').replace(/\n+$/, '')}\n`
+    const estimatedTokens = estimateTokens(nextRaw)
+    if (estimatedTokens > maxTokens) {
+      return { ok: false, reason: 'PROFILE_BUDGET_EXCEEDED', estimatedTokens, maxTokens }
+    }
+  } else {
+    const planned = planProfileMutation(currentRaw, {
+      op: 'add',
+      id: oldEntry.id,
+      section: oldEntry.section || DEFAULT_SECTION,
+      content: oldEntry.content,
+      added: oldEntry.added || '',
+      source: oldEntry.source || 'manual',
+      supersedes: oldEntry.supersedes,
+      expires: oldEntry.expires,
+      pinned: oldEntry.pinned === true,
+    }, { maxTokens })
+    if (!planned.ok) return planned
+    nextRaw = planned.raw
+  }
+
+  await atomicWriteFile(profilePath(home), nextRaw)
+  const at = nowIso || new Date().toISOString()
+  if (activeReplacement) {
+    await appendRetiredRecord(home, {
+      event: 'retired',
+      retired_at: at,
+      reason: `rollback:${cleanId}`,
+      op: 'rollback',
+      replaced_by: cleanId,
+      entry: serializeRetiredEntry(activeReplacement),
+    })
+  }
+  await appendRetiredRecord(home, {
+    event: 'rollback_restore',
+    at,
+    restored_id: cleanId,
+    retired_replacement_id: activeReplacement?.id ?? null,
+  })
+
+  return {
+    ok: true,
+    restoredId: cleanId,
+    retiredReplacementId: activeReplacement?.id ?? null,
+    estimatedTokens: estimateTokens(nextRaw),
+  }
+}
+
+export async function redactProfileForForget(home, { anchors = [], keyword, force = false } = {}) {
+  const currentRaw = readProfile(home)
+  if (!currentRaw) {
+    return { removedIds: [], skippedPinnedIds: [], changed: false }
+  }
+  const anchorSet = new Set((anchors ?? []).filter(Boolean))
+  const lowerKeyword = typeof keyword === 'string' && keyword.trim() !== '' ? keyword.trim().toLowerCase() : undefined
+  if (anchorSet.size === 0 && lowerKeyword === undefined) {
+    return { removedIds: [], skippedPinnedIds: [], changed: false }
+  }
+
+  const entries = parseProfileEntries(currentRaw)
+  const removeLineIndices = new Set()
+  const removedIds = []
+  const skippedPinnedIds = []
+
+  for (const entry of entries) {
+    const hitAnchor = entry.source && anchorSet.has(entry.source)
+    const hitKeyword = lowerKeyword !== undefined && (
+      entry.content.toLowerCase().includes(lowerKeyword)
+      || entry.rawLine.toLowerCase().includes(lowerKeyword)
+    )
+    if (!hitAnchor && !hitKeyword) continue
+
+    if (entry.pinned && !force) {
+      skippedPinnedIds.push(entry.id || entry.content)
+      continue
+    }
+    removeLineIndices.add(entry.lineIndex)
+    removedIds.push(entry.id || entry.content)
+  }
+
+  if (removeLineIndices.size === 0) {
+    return { removedIds: [], skippedPinnedIds, changed: false }
+  }
+
+  const nextLines = currentRaw.split(/\r?\n/).filter((_line, index) => !removeLineIndices.has(index))
+  const hasRemainingBullets = parseProfileEntries(nextLines.join('\n')).length > 0
+  const nextRaw = hasRemainingBullets ? `${nextLines.join('\n').replace(/\n+$/, '')}\n` : ''
+  await atomicWriteFile(profilePath(home), nextRaw)
+  return { removedIds, skippedPinnedIds, changed: true }
+}
+
+export async function purgeRetiredForForget(home, { anchors = [], keyword, entryIds = [] } = {}) {
+  const records = readRetiredRecords(home)
+  if (records.length === 0) return { purgedCount: 0 }
+
+  const anchorSet = new Set((anchors ?? []).filter(Boolean))
+  const idSet = new Set((entryIds ?? []).filter(Boolean))
+  const lowerKeyword = typeof keyword === 'string' && keyword.trim() !== '' ? keyword.trim().toLowerCase() : undefined
+  if (anchorSet.size === 0 && idSet.size === 0 && lowerKeyword === undefined) {
+    return { purgedCount: 0 }
+  }
+
+  const kept = []
+  let purgedCount = 0
+  for (const rec of records) {
+    const serialized = JSON.stringify(rec).toLowerCase()
+    const entry = rec?.entry
+    const hitAnchor = entry?.source && anchorSet.has(entry.source)
+    const hitId = (entry?.id && idSet.has(entry.id)) || (rec?.restored_id && idSet.has(rec.restored_id))
+    const hitKeyword = lowerKeyword !== undefined && serialized.includes(lowerKeyword)
+    if (hitAnchor || hitId || hitKeyword) {
+      purgedCount += 1
+      continue
+    }
+    kept.push(JSON.stringify(rec))
+  }
+
+  if (purgedCount === 0) return { purgedCount: 0 }
+  if (kept.length === 0) {
+    try { rmSync(retiredPath(home), { force: true }) } catch {}
+  } else {
+    await atomicWriteFile(retiredPath(home), `${kept.join('\n')}\n`)
+  }
+  return { purgedCount }
 }

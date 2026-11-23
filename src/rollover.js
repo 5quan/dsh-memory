@@ -9,6 +9,7 @@ export function createRolloverApi({
   contextApi,
   journalApi,
   bufferApi,
+  dreamApi,
   clock = { now: () => Date.now() },
   onRollover,
   warn = () => {},
@@ -68,10 +69,24 @@ export function createRolloverApi({
     return clock.now() - lastActivityAt >= config.idleMinutes * 60_000
   }
 
+  async function maybeRunDream(isStartup, scope) {
+    if (isStartup || !isIdleEnough() || !dreamApi || config.dream?.enabled === false) return null
+    try {
+      if (!dreamApi.shouldRunDream({ scope, isIdle: true })) return null
+      return await dreamApi.runDream({ scope, dryRun: false })
+    } catch (error) {
+      warn('dsh-memory: idle dream run failed: %s', error?.message ?? error)
+      return { ok: false, error: error?.message ?? String(error) }
+    }
+  }
+
   async function processPendingDates({ isStartup = false, scope = 'default' } = {}) {
     const today = currentLogicalDate()
     const pendingDates = store.listPendingRolloverDates(today, scope)
-    if (pendingDates.length === 0) return { rolledOver: [], failed: [] }
+    if (pendingDates.length === 0) {
+      const dream = await maybeRunDream(isStartup, scope)
+      return { rolledOver: [], failed: [], ...(dream ? { dream } : {}) }
+    }
 
     if (!isStartup && !isIdleEnough()) {
       return { rolledOver: [], failed: [], waitingIdle: true }
@@ -117,7 +132,8 @@ export function createRolloverApi({
       }
     }
 
-    return { rolledOver, failed }
+    const dream = await maybeRunDream(isStartup, scope)
+    return { rolledOver, failed, ...(dream ? { dream } : {}) }
   }
 
   function checkAndRollover(options = {}) {

@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto'
 import { readdirSync, readFileSync } from 'node:fs'
 import { appendFile, mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
+import { checkDuplicateContent, detectSecret, MemoryGuardError } from './guard.js'
+import * as defaultProfileApi from './profile.js'
 
 export const BUFFER_DIR = 'buffer'
 export const VALID_TARGETS = ['profile', 'note']
@@ -18,7 +20,7 @@ export function isValidTarget(target) {
   return target === 'profile' || target === 'note' || (typeof target === 'string' && target.startsWith('entity:') && target.length > 7)
 }
 
-export function createBufferApi({ home, clock = { now: () => Date.now() } }) {
+export function createBufferApi({ home, profileApi = defaultProfileApi, clock = { now: () => Date.now() } }) {
   let writeChain = Promise.resolve()
 
   const queued = (task) => {
@@ -72,6 +74,11 @@ export function createBufferApi({ home, clock = { now: () => Date.now() } }) {
           supersedes_id: evt.supersedes_id ?? null,
           anchor: evt.anchor ?? null,
           pinned: evt.pinned === true,
+          ...(typeof evt.content_hash === 'string' && evt.content_hash !== '' ? { content_hash: evt.content_hash } : {}),
+          ...(typeof evt.expires === 'string' && evt.expires !== '' ? { expires: evt.expires } : {}),
+          ...(typeof evt.dream_key === 'string' && evt.dream_key !== '' ? { dream_key: evt.dream_key } : {}),
+          ...(typeof evt.reason === 'string' && evt.reason !== '' ? { reason: evt.reason } : {}),
+          ...(evt.conflict === true ? { conflict: true } : {}),
           ...(typeof evt.producer === 'string' && evt.producer !== '' ? { producer: evt.producer } : {}),
           status: evt.status ?? 'pending',
           history: [evt],
@@ -118,13 +125,52 @@ export function createBufferApi({ home, clock = { now: () => Date.now() } }) {
   }
 
   function appendCreate(input) {
+    const content = String(input.content ?? '').trim()
+    if (content === '') return Promise.reject(new Error('appendCreate requires non-empty content'))
+    const secret = detectSecret(content)
+    if (secret.detected) {
+      return Promise.reject(new MemoryGuardError(secret.code, secret.message, { kind: secret.kind }))
+    }
+
     return queued(async () => {
       const logicalDate = input.logicalDate || input.logical_date
       if (!logicalDate) throw new Error('appendCreate requires logicalDate')
-      const content = String(input.content ?? '').trim()
-      if (content === '') throw new Error('appendCreate requires non-empty content')
       const target = input.target ?? 'profile'
       if (!isValidTarget(target)) throw new Error(`Invalid buffer target: ${target}`)
+
+      const scope = input.scope ?? 'default'
+      const op = input.op ?? 'add'
+      const section = input.section || '其他长期事实'
+      const activeItems = [...loadFoldedMap().values()]
+      const profileEntries = target === 'profile' && profileApi
+        ? profileApi.parseProfileEntries(profileApi.readProfile(home))
+        : []
+      const dup = checkDuplicateContent({
+        content,
+        scope,
+        target,
+        section,
+        op,
+        bufferItems: activeItems,
+        profileEntries,
+      })
+      if (dup.duplicate && input.allowDuplicate !== true) {
+        return {
+          ...(dup.existingItem ?? {}),
+          id: dup.existingId,
+          logical_date: dup.existingItem?.logical_date ?? logicalDate,
+          scope,
+          source_type: dup.existingItem?.source_type ?? (input.sourceType ?? input.source_type ?? 'extracted'),
+          target,
+          op,
+          section,
+          content: dup.existingItem?.content ?? dup.existingEntry?.content ?? content,
+          content_hash: dup.contentHash,
+          duplicate: true,
+          skipped: true,
+          duplicateIn: dup.duplicateIn,
+        }
+      }
 
       const id = input.id || `buf_${logicalDate.replaceAll('-', '')}_${randomUUID().slice(0, 8)}`
       const event = {
@@ -132,15 +178,20 @@ export function createBufferApi({ home, clock = { now: () => Date.now() } }) {
         id,
         logical_date: logicalDate,
         created_at: input.createdAt || new Date(clock.now()).toISOString(),
-        scope: input.scope ?? 'default',
+        scope,
         source_type: input.sourceType ?? input.source_type ?? 'extracted',
         target,
-        op: input.op ?? 'add',
-        section: input.section || '其他长期事实',
+        op,
+        section,
         content,
+        ...(dup.contentHash ? { content_hash: dup.contentHash } : {}),
         supersedes_id: input.supersedesId ?? input.supersedes_id ?? null,
         anchor: input.anchor ?? null,
         pinned: input.pinned === true,
+        ...(typeof input.expires === 'string' && input.expires.trim() !== '' ? { expires: input.expires.trim() } : {}),
+        ...(typeof input.dreamKey === 'string' && input.dreamKey.trim() !== '' ? { dream_key: input.dreamKey.trim() } : {}),
+        ...(typeof input.reason === 'string' && input.reason.trim() !== '' ? { reason: input.reason.trim() } : {}),
+        ...(input.conflict === true ? { conflict: true } : {}),
         ...(typeof input.producer === 'string' && input.producer.trim() !== '' ? { producer: input.producer.trim() } : {}),
       }
       await appendRawEvent(logicalDate, event)
@@ -204,10 +255,25 @@ export function createBufferApi({ home, clock = { now: () => Date.now() } }) {
   function rejectByAnchors(anchors, { by = 'user', reason = 'memory_forget' } = {}) {
     const anchorSet = new Set((anchors ?? []).filter(Boolean))
     if (anchorSet.size === 0) return Promise.resolve([])
+    return rejectForForget({ anchors: [...anchorSet], by, reason })
+  }
+
+  function rejectForForget({ anchors = [], keyword, date, scope, by = 'user', reason = 'memory_forget' } = {}) {
+    const anchorSet = new Set((anchors ?? []).filter(Boolean))
+    const lowerKeyword = typeof keyword === 'string' && keyword.trim() !== '' ? keyword.trim().toLowerCase() : undefined
+    const forgetWholeDate = Boolean(date) && anchorSet.size === 0 && lowerKeyword === undefined
+    if (anchorSet.size === 0 && lowerKeyword === undefined && !forgetWholeDate) {
+      return Promise.resolve([])
+    }
     return queued(async () => {
-      const active = [...loadFoldedMap().values()].filter(
-        item => (item.status === 'pending' || item.status === 'approved') && item.anchor && anchorSet.has(item.anchor),
-      )
+      const active = [...loadFoldedMap().values()].filter((item) => {
+        if (item.status !== 'pending' && item.status !== 'approved') return false
+        if (scope && item.scope !== scope) return false
+        const hitAnchor = Boolean(item.anchor && anchorSet.has(item.anchor))
+        const hitKeyword = lowerKeyword !== undefined && item.content.toLowerCase().includes(lowerKeyword)
+        const hitDate = forgetWholeDate && item.logical_date === date
+        return hitAnchor || hitKeyword || hitDate
+      })
       const at = new Date(clock.now()).toISOString()
       const rejected = []
       for (const item of active) {
@@ -317,11 +383,14 @@ export function createBufferApi({ home, clock = { now: () => Date.now() } }) {
             supersedesId: item.supersedes_id,
             added: item.logical_date,
             source: item.anchor || effectiveSource,
+            ...(item.expires ? { expires: item.expires } : {}),
+            ...(item.reason ? { reason: item.reason } : {}),
             pinned: item.pinned,
           },
           {
             maxTokens: config.sections.profile.maxTokens,
             allowPinned: item.status === 'approved',
+            nowIso: new Date(clock.now()).toISOString(),
           },
         )
         return result.ok ? { ...result, commitReason: `committed to PROFILE.md (${result.id})` } : result
@@ -420,6 +489,7 @@ export function createBufferApi({ home, clock = { now: () => Date.now() } }) {
     appendStatus,
     updateStatuses,
     rejectByAnchors,
+    rejectForForget,
     settleProfileForDate,
     settleEntitiesForDate,
     settleDates,

@@ -1,0 +1,110 @@
+{
+  "version": 1,
+  "todayDate": "2026-11-25",
+  "timeZone": "Asia/Shanghai",
+  "profile": [
+    { "section": "基本身份与环境", "content": "主力开发环境为 Windows 11 + Node.js v24 + pnpm。", "added": "2026-10-01", "source": "manual", "pinned": true },
+    { "section": "沟通与工作偏好", "content": "汇报先说结论再给细节，避免冗长铺垫。", "added": "2026-10-05", "source": "manual" },
+    { "section": "长期规矩与边界", "content": "输出破坏性命令前必须先说明风险。", "added": "2026-10-12", "source": "manual", "pinned": true }
+  ],
+  "entities": [
+    {
+      "name": "老王",
+      "type": "person",
+      "aliases": ["王总", "LaoWang"],
+      "facts": [
+        { "content": "负责生产机房 A（端口 8443）的日常运维与数据库备份。", "added": "2026-10-08", "source": "chat://2026-10-08#main#4" },
+        { "content": "每周二下午 16:00 主持线上巡检例会。", "added": "2026-11-12", "source": "chat://2026-11-12#main#7" }
+      ]
+    },
+    {
+      "name": "网关项目",
+      "type": "project",
+      "aliases": ["Gateway", "API-GW"],
+      "facts": [
+        { "content": "默认部署于 D:/srv/gateway，采用零停机蓝绿切换。", "added": "2026-10-15", "source": "chat://2026-10-15#main#9" }
+      ]
+    }
+  ],
+  "journals": [
+    {
+      "date": "2026-10-08",
+      "markdown": "# 2026-10-08 日报\n\n## 发生了什么\n- [chat://2026-10-08#main#4] 确定生产机房 A 由老王（LaoWang）负责，SSH 运维端口 8443。\n\n## 做出的决定\n- [chat://2026-10-08#main#6] 初版发布窗口暂定在每周五下午 17:00。\n\n## 新建/变更的事项\n- （无）\n\n## 纠正与教训\n- （无）\n\n## 悬而未决的问题\n- （无）\n\n## 提到的实体\n- 老王"
+    },
+    {
+      "date": "2026-11-12",
+      "markdown": "# 2026-11-12 日报\n\n## 发生了什么\n- [chat://2026-11-12#main#7] 同步巡检时间，老王每周二 16:00 主持巡检例会。\n\n## 做出的决定\n- [chat://2026-11-12#main#10] 正式改口：取消周五 17:00 发版，以后统一改为周三下午 15:00 发版。\n\n## 新建/变更的事项\n- （无）\n\n## 纠正与教训\n- [chat://2026-11-12#main#12] 用户纠正：严禁跳过单测直接提交 PR，必须先跑通全部单测。\n\n## 悬而未决的问题\n- （无）\n\n## 提到的实体\n- 老王, 网关项目"
+    },
+    {
+      "date": "2026-11-24",
+      "markdown": "# 2026-11-24 日报\n\n## 发生了什么\n- [chat://2026-11-24#main#3] 确认 2026-11-25 晨会前完成 Gateway 灰度回归。\n\n## 做出的决定\n- [chat://2026-11-24#main#6] 临时测试密钥统一用环境变量 GATEWAY_TEST_TOKEN 传递，不写入文档。\n\n## 新建/变更的事项\n- 助手承诺：今天内输出 M4 回归检查清单。\n\n## 纠正与教训\n- [chat://2026-11-24#main#8] 用户强调：回答技术方案时先说结论，不要绕弯子。\n\n## 悬而未决的问题\n- 待补充压测基线数据。\n\n## 提到的实体\n- 网关项目"
+    }
+  ],
+  "messages": [
+    { "sessionId": "main", "logicalDate": "2026-10-08", "seq": 4, "role": "user", "text": "记一下，生产机房 A（端口 8443）以后统一交给老王负责，备份脚本放 D:/ops/backup.ps1。", "timestamp": "2026-10-08T11:00:00+08:00" },
+    { "sessionId": "main", "logicalDate": "2026-10-08", "seq": 6, "role": "user", "text": "目前暂定每周五下午 17:00 发版。", "timestamp": "2026-10-08T11:10:00+08:00" },
+    { "sessionId": "main", "logicalDate": "2026-11-12", "seq": 10, "role": "user", "text": "不对，周五发版太晚了，以后统一改到每周三下午 15:00 发版，取消周五窗口。", "timestamp": "2026-11-12T14:00:00+08:00" },
+    { "sessionId": "main", "logicalDate": "2026-11-12", "seq": 12, "role": "user", "text": "别再没跑单测就交 PR 了，以后一律先跑通全部单测再提。", "timestamp": "2026-11-12T14:05:00+08:00" },
+    { "sessionId": "main", "logicalDate": "2026-11-24", "seq": 2, "role": "user", "text": "Gateway 灰度回归之前要检查什么？", "timestamp": "2026-11-24T18:00:00+08:00" },
+    { "sessionId": "main", "logicalDate": "2026-11-24", "seq": 3, "role": "assistant", "text": "需要在 2026-11-25 晨会前检查错误率阈值（<0.1%）和 P99 延迟（<120ms），确认完成 Gateway 灰度回归。", "timestamp": "2026-11-24T18:01:00+08:00" },
+    { "sessionId": "main", "logicalDate": "2026-11-24", "seq": 6, "role": "user", "text": "测试凭据统一读环境变量 GATEWAY_TEST_TOKEN，不要把值写进仓库。", "timestamp": "2026-11-24T18:10:00+08:00" }
+  ],
+  "cases": [
+    {
+      "id": "temporal_release_window",
+      "category": "temporal",
+      "question": "我们以前定的发版窗口是什么时间，现在改成了什么时候？",
+      "expectedFacts": ["周五", "17:00", "周三", "15:00"],
+      "goldMemory": "2026-10-08 曾暂定每周五 17:00 发版；2026-11-12 已改为每周三下午 15:00 发版，取消周五窗口。"
+    },
+    {
+      "id": "correction_pr_rule",
+      "category": "correction",
+      "question": "提 PR 前我之前纠正过必须先做什么？",
+      "expectedFacts": ["单测"],
+      "goldMemory": "用户纠正过：严禁跳过单测直接提交 PR，必须先跑通全部单测再提。"
+    },
+    {
+      "id": "correction_reporting_style",
+      "category": "correction",
+      "question": "我喜欢的汇报沟通风格是什么？",
+      "expectedFacts": ["先说结论"],
+      "goldMemory": "汇报先说结论再给细节，避免冗长铺垫。"
+    },
+    {
+      "id": "entity_laowang",
+      "category": "entity",
+      "question": "生产机房 A 归谁管、端口是多少，例会什么时候？",
+      "expectedFacts": ["老王", "8443", "周二", "16:00"],
+      "goldMemory": "老王（LaoWang）负责生产机房 A（端口 8443），每周二下午 16:00 主持线上巡检例会。"
+    },
+    {
+      "id": "entity_gateway",
+      "category": "entity",
+      "question": "Gateway 项目默认部署在哪个目录，用什么切换策略？",
+      "expectedFacts": ["D:/srv/gateway", "蓝绿"],
+      "goldMemory": "网关项目（Gateway）默认部署于 D:/srv/gateway，采用零停机蓝绿切换。"
+    },
+    {
+      "id": "verbatim_backup_script",
+      "category": "verbatim",
+      "question": "机房 A 的备份脚本具体放在哪个文件路径？",
+      "expectedFacts": ["D:/ops/backup.ps1"],
+      "goldMemory": "生产机房 A 的备份脚本放在 D:/ops/backup.ps1。"
+    },
+    {
+      "id": "verbatim_canary_thresholds",
+      "category": "verbatim",
+      "question": "昨天提到的 Gateway 灰度回归具体错误率和 P99 延迟阈值是多少？",
+      "expectedFacts": ["0.1%", "120ms"],
+      "goldMemory": "Gateway 灰度回归需检查错误率阈值 <0.1% 与 P99 延迟 <120ms。"
+    },
+    {
+      "id": "temporal_env_secret",
+      "category": "temporal",
+      "question": "昨天决定的网关测试凭据应该怎么传递？",
+      "expectedFacts": ["GATEWAY_TEST_TOKEN"],
+      "goldMemory": "临时测试密钥统一通过环境变量 GATEWAY_TEST_TOKEN 传递，不写入文档。"
+    }
+  ]
+}
