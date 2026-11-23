@@ -133,6 +133,21 @@ export function createContextApi({
   warn = () => {},
 }) {
   const memoryCache = new Map()
+  let lastFrozenSectionSignature = null
+
+  function frozenSectionSignature() {
+    return JSON.stringify([
+      config.sections.profile.enabled,
+      config.sections.profile.maxTokens,
+      config.sections.yesterday.enabled,
+      config.sections.yesterday.maxTokens,
+      config.sections.recentDays.enabled,
+      config.sections.recentDays.days,
+      config.sections.recentDays.maxTokens,
+      config.sections.historyOverview.enabled,
+      config.sections.historyOverview.maxTokens,
+    ])
+  }
 
   function effectiveMode(sessionId) {
     if (!sessionId) return config.defaultMode
@@ -259,6 +274,12 @@ export function createContextApi({
   function sectionFor(sessionId) {
     if (!sessionId) return ''
     if (effectiveMode(sessionId) === 'off') return ''
+
+    const sig = frozenSectionSignature()
+    if (lastFrozenSectionSignature !== null && sig !== lastFrozenSectionSignature) {
+      invalidateSnapshots()
+    }
+    lastFrozenSectionSignature = sig
 
     const todayDate = currentLogicalDate()
     const cacheKey = `${sessionId}::${todayDate}`

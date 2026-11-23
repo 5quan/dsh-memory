@@ -1,3 +1,4 @@
+import { snapshotLiveConfig } from './config.js'
 import { MemoryGuardError } from './guard.js'
 import { estimateTokens, logicalDateOf } from './util.js'
 
@@ -245,5 +246,6 @@ export function createPublicService({
     submitOnboarding,
     skipOnboarding,
     resetOnboarding,
+    getSettingsSnapshot: () => snapshotLiveConfig(config),
   })
 }

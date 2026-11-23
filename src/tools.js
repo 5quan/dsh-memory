@@ -982,7 +982,7 @@ export function createToolsApi({
       description: 'Manually trigger M4 Dream background consolidation (rule + optional LLM pass) to queue dedup, expiry, or conflict proposals into buffer without silently mutating PROFILE.md.',
       parameters: {
         dryRun: { type: 'boolean', description: 'If true, preview proposals without writing to buffer or advancing Dream watermark.' },
-        useLlm: { type: 'boolean', description: 'Whether to run semantic LLM pass alongside rules (default true).' },
+        useLlm: { type: 'boolean', description: 'Whether to run semantic LLM pass alongside rules (defaults to config.dream.useLlm, which is false by default).' },
         scope: { type: 'string', description: 'Optional memory scope (default current session scope).' },
       },
       output: stringOutput,
@@ -1003,7 +1003,7 @@ export function createToolsApi({
         const res = await dreamApi.runDream({
           scope,
           dryRun,
-          useLlm: args.useLlm !== false,
+          useLlm: typeof args.useLlm === 'boolean' ? args.useLlm : undefined,
           force: true,
           signal: exec.signal,
         })

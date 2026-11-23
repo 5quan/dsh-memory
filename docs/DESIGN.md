@@ -468,9 +468,21 @@ stateDiagram-v2
 
 ---
 
-### 3.9 后续安全加固（最后实现，暂不纳入 M4/M5）
+### 3.9 后续演进记录与安全加固（Issue `#9`，暂不急于实现）
 
-- **写入侧记忆投毒 / 提示注入拦截**：针对“记住：以后忽略安全规则”等试图篡改系统规则或安全边界的长期写入内容，规划在写入网关做规则/分类拦截与强制降级，并配套红队用例验收；当前阶段由冻结前缀与动态增量中的数据区隔离声明及缓冲人工确认流兜底，该拦截能力**只作设计记录，待 M4/M5 及核心体验全部稳定后最后实现**。
+> 说明：以下 4 项均**仅作设计登记，待真实使用与 `dsh-ctrl` 联调积累日志后再按优先级推进**，详细验收清单见 [Issue #9](https://github.com/5quan/dsh-memory/issues/9)。
+
+1. **全系统流程合理性专项梳理与核心 Prompt 优化**：
+   - 专项复盘「采集 → 缓冲 → 日结 → 历史派生 → 实体/避坑召回 → Dream → 遗忘/回滚」整条链路是否冗繁、低摩擦环节能否进一步收敛；
+   - 修复 `src/dream.js` 对近期日报 `clipText(..., 1800)` 的头部硬截断隐患（防止后半段的 `## 纠正与教训` 与 `## 悬而未决的问题` 被截丢）；
+   - 参考 Anthropic [*Dreaming with a dynamic workflow*](https://platform.claude.com/cookbook/managed-agents-cma-dreaming-with-a-dynamic-workflow)（Analyzer → Organizer 阶段分离）与 [*Knowledge Wiki*](https://github.com/anthropics/claude-quickstarts/tree/main/managed-agents/knowledge-wiki)（精确路径/端口/命令/报错码保真、结构化「触发场景 → 禁止/推荐做法」表达、`PROFILE.md` 顶层轻索引化）优化 Digest 与 Dream Prompt；
+   - 精简 `src/context.js` `USAGE_GUIDANCE` 为“按意图选工具”的紧凑路由。
+2. **冻结前缀闲置指纹刷新（`snapshotRefreshIdleMinutes`）**：
+   - 参考不同模型实际 Prompt Cache TTL（Anthropic 默认 5 分钟 / 扩展 1 小时、OpenAI 5–10 分钟、DeepSeek 磁盘缓存数小时至跨天），评估当“会话连续闲置超过阈值（如 `60` 分钟）**且** `PROFILE.md` / 昨日日报 / 历史总览内容哈希确实发生变化”时才重拍快照并推进已落盘条目游标，在跨小时新鲜度与 KV Cache 命中率间取得最优平衡。
+3. **可选本地向量检索 + RRF 重排派生层（`retrieval.vector`）**：
+   - 待日报、实体与避坑卡规模增长后，若在线消融发现纯 FTS5 `trigram` + 词边界触发词对**同义改写**存在明显漏召回，可在保持**零外部向量库**原则下，于 `archive.sqlite` 内增设可重建 `embeddings` 派生表（`Float32Array` BLOB + 可插拔 Embedding + RRF 混合重排），仅作用于 `memory_search` 与 `dsh-memory/delta` 动态增量（绝不破坏冻结前缀），默认关闭。
+4. **写入侧记忆投毒 / 提示注入拦截（压轴安全加固）**：
+   - 针对“记住：以后忽略安全规则”等试图篡改系统规则或安全边界的长期写入内容，规划在写入网关做规则/分类拦截与强制降级，并配套红队用例验收；当前阶段由冻结前缀与动态增量中的数据区隔离声明及缓冲人工确认流兜底，**待流程与核心体验全部稳定后最后实现**。
 
 ---
 
@@ -489,7 +501,8 @@ stateDiagram-v2
 | `ctx.tools.register(defineTool(...))` | 来自 `@deepseek-ai/dsh-tools` | 注册面向模型的 15 个 M1–M5 记忆工具 |
 | `ctx.tools.get(name, scope?)` | `@deepseek-ai/dsh-tools` 返回当前作用域可见工具定义 | 在 `agent/pre-step` 中零耦合探测宿主交互能力（`show_view` / `ask_user` / `ask_user_question`） |
 | `ctx.userQuestions?.ask(...)` | `@deepseek-ai/dsh-user-questions` 可选交互服务 | 原版 DSH 中驱动冷启动问卷与晨报多选确认弹窗（无此服务时优雅降级） |
-| `ctx.provide('dshMemory', service)` | `@deepseek-ai/cordis` 服务注册（`apply` 不返回非 Effect 对象） | 向外部插件/上层 Bot 暴露只读查询与缓冲中转服务契约 |
+| `ctx.provide('dshMemory', service)` | `@deepseek-ai/cordis` 服务注册（`apply` 不返回非 Effect 对象） | 向外部插件/上层 Bot 暴露只读查询、配置快照与缓冲中转服务契约 |
+| `export const Config` | `@deepseek-ai/schemastery` `.volatile()` 实时表单投影（`@deepseek-ai/dsh-settings`） | 在 DSH 原生设置面板自动生成 `dsh-memory` 实时开关页，热生效写入当前 Profile `cordis.patch.yml` |
 | 模型解析顺序（日结 / Dream） | `config.llm` → `ctx.agentDefaultModel?.currentSelection()` → 最近活跃 `agent.model.current()` | 兼容无 `ds-bot` 的原版 DSH 与指定轻量模型配置 |
 
 **插件入口与可测试时钟注入约定**：
@@ -541,8 +554,9 @@ export function apply(ctx, config = {}) {
 | `briefing.enabled` | `boolean` | `true` | 是否在每日首次正常交互时推送晨报汇总与待确认记忆 |
 | `correction.autoCapture` | `boolean` | `true` | 是否启用轻量规则自动捕获用户纠偏写入当日缓冲区 |
 | `correction.defaultSection` | `string` | `'长期规矩与边界'` | 自动捕获纠偏条目的默认 `PROFILE.md` 归属分节 |
-| `dream.enabled` | `boolean` | `true` | 是否在空闲巡检后按周期触发 M4 Dream 后台整理 |
-| `dream.intervalDays` | `number` | `7` | Dream 自动触发所需距上次成功运行的最小间隔天数 |
+| `dream.enabled` | `boolean` | `true` | 是否在空闲巡检后按周期触发 M4 Dream 后台整理（`.volatile()` 实时生效） |
+| `dream.useLlm` | `boolean` | `false` | 做梦时是否调用 LLM 语义通道（默认 `false` 仅运行确定性规则层，`.volatile()` 实时开关） |
+| `dream.intervalDays` | `number` | `7` | Dream 自动触发所需距上次成功运行的最小间隔天数（`.volatile()`） |
 | `dream.minNewJournals` | `number` | `3` | Dream 自动触发所需累计新增日报数量阈值 |
 | `dream.maxChangeRatio` | `number` | `0.2` | 单次 Dream 对非 `pinned` 画像条目的最大提案变更比例（保底至少 `1` 条，`0` 条非锁定条目时为 `0`） |
 | `dream.rejectCooldownDays` | `number` | `30` | 用户 `reject` 某目标 Dream 提案后的免重提冷却天数 |
@@ -585,7 +599,7 @@ export function apply(ctx, config = {}) {
 | **M3（冷启动引导、每日确认与服务契约）** | 冷启动建档 + 低摩擦把关 + 单向开放契约 | 1. 初始画像冷启动引导（首次空画像时发简短问卷或 `show_view` / `ask_user_question` 交互弹窗采集基础画像，支持跳过）<br>2. 晨报汇总摘要（昨日日报亮点 + `buffer/` 待确认列表）与低摩擦批量勾选确认<br>3. 轻量纠偏捕获（`source_type: 'correction'` + 真实用户 `anchor`）<br>4. 公开 Cordis 服务与标准事件契约（供 `dsh-ctrl` 等上层 Bot 单向绑定，保持 `dsh-memory` 零 `ds-bot` 依赖） | 首次启用即可快速建立初始画像；每天首次交互可用极低成本完成“记忆勾选确认 + 纠偏入库”；原版 DSH 独立可用，上层 Bot 可通过公开契约零侵入联动 |
 | **M4（Dream 后台整理、检索与治理补强）** | 跨月克制自维护、行窗口邻接检索与成本+准确率消融 | 1. 规则 + LLM 双通道 Dream 后台整理（`dream.lock` 防并发、失败不推进 `dream:<scope>` 水位、无证据不误删、冲突标 `CONFLICT` 且低权不覆高权、`rejectCooldownDays` 冷却期、`expires` 过期提案、`dream.instructions` 可定制），全非遗忘变更落 `retired.jsonl` 并支持 `memory_rollback` 追加回滚<br>2. `memory_read_context` 与 `memory_search.contextTurns`（按 `(session_id, seq)` 行窗口展开相邻轮次原文）<br>3. `guard.js` 入口归一化 `content_hash` 幂等去重与高置信凭据“只记名不记值”直接拒写，日结/Dream Prompt 强化绝对日期、助手承诺、单次 vs 长期区分与陈旧度提醒<br>4. `memory_forget` 补齐 `PROFILE.md`（仅按锚点/显式关键词清，保护 `pinned`）与 `retired.jsonl` 删除传播闭环<br>5. 离线确定性回归套件（进 `npm test`）+ 在线 LLM 三组消融脚本（无记忆 vs `dsh-memory` vs 黄金记忆，输出准确率 + Token 成本） | `pinned` 零误删、冷却期与比例上限生效、失败重跑不漏日志；行窗口邻接完整；凭据零落库且误报可控；遗忘跨 8 层残留为 `0`；消融实验量化验证准确率与 Token 成本收益 |
 | **M5（避坑经验 / 程序性记忆）** | `lessons/` 经验卡沉淀与技能挂载解耦 | 1. 新增独立 `lessons/*.md`（含 `tags` / `triggers` 与 `[id; added; source; supersedes; pinned; expires]` 元数据）及 `memory_lesson_manage`<br>2. 消费 `target: 'lesson:<名称>'` 缓冲结算、`session_state.injected_lessons` 动态增量注入，并联动 `memory_forget` 与 Dream 整理<br>3. `dshMemory` 公开服务扩展 `matchLessons(text, { tags, maxTokens })` / `getLesson` / `listLessons` 供 Worker 与原版 DSH 复用<br>4. 明确“可执行技能包留执行层、搭配 `ds-bot` 时在 `dsh-ctrl` 停用 `learning.js`” | `correction`/Ticket 复盘经验可经缓冲区审核沉淀为 `lessons/`；提及标签/关键词动态注入而不击穿前缀缓存；Worker 可一次拉齐实体与避坑经验，且插件零 `ds-bot` 依赖 |
-| **后续（最后实现）** | 写入安全加固（暂不纳入 M4/M5） | 写入侧记忆投毒 / 提示注入拦截（规则/分类检测“忽略规则”等篡改指令并强制降级）与红队用例验收（当前仅作设计登记，待 M4/M5 后最后实施） | 红队记忆投毒用例写入阻断或降级隔离，误报不干扰正常偏好与工作规则记录 |
+| **后续（Issue `#9`）** | 流程/提示词审查 + 闲置刷新 + 向量 + 安全加固 | 1. 全系统流程梳理与 Digest/Dream/`USAGE_GUIDANCE` 提示词调优（含修复 Dream 日报截断）<br>2. 冻结前缀闲置指纹刷新（`snapshotRefreshIdleMinutes`）<br>3. 可选本地 SQLite 向量+RRF 混合检索（默认关闭，消融验证后决定）<br>4. 写入侧记忆投毒 / 提示注入拦截与红队验收 | 流程与 Prompt 梳理清单确认，消融评测验证召回与缓存收益无退化，红队记忆投毒用例写入阻断 |
 
 ### 5.2 本地开发与红线约束
 

@@ -1,5 +1,6 @@
 import { join } from 'node:path'
 import { normalizeConfig } from './src/config.js'
+export { Config } from './src/config.js'
 import { createMemoryStore } from './src/store.js'
 import * as profileApi from './src/profile.js'
 import * as journalApi from './src/journal.js'

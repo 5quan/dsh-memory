@@ -290,7 +290,7 @@ export function createDreamApi({
   async function runDream({
     scope = 'default',
     dryRun = false,
-    useLlm = true,
+    useLlm,
     force = false,
     signal,
   } = {}) {
@@ -349,7 +349,8 @@ export function createDreamApi({
       let degraded = false
       const llmCandidates = []
 
-      const shouldInvokeLlm = useLlm !== false
+      const effectiveUseLlm = useLlm !== undefined ? useLlm === true : config.dream?.useLlm === true
+      const shouldInvokeLlm = effectiveUseLlm
         && (profileEntries.length > 0 || lessons.length > 0)
         && (newJournals.length > 0 || ((dryRun || force) && allJournalDates.length > 0) || recentCorrections.length > 0 || diagnostics.budgetPressure)
 
