@@ -117,8 +117,7 @@ function insertLineInSection(lines, sectionTitle, formattedLine) {
   return result
 }
 
-export async function applyProfileMutation(home, mutation, { maxTokens = 2000, allowPinned = false } = {}) {
-  const currentRaw = readProfile(home)
+export function planProfileMutation(currentRaw, mutation, { maxTokens = 2000, allowPinned = false } = {}) {
   const entries = parseProfileEntries(currentRaw)
   const lines = currentRaw === '' ? [] : currentRaw.split(/\r?\n/)
   const op = mutation.op ?? 'add'
@@ -145,7 +144,6 @@ export async function applyProfileMutation(home, mutation, { maxTokens = 2000, a
         maxTokens,
       }
     }
-    await atomicWriteFile(profilePath(home), nextRaw)
     return { ok: true, id, raw: nextRaw, estimatedTokens }
   }
 
@@ -161,8 +159,7 @@ export async function applyProfileMutation(home, mutation, { maxTokens = 2000, a
   if (op === 'retire') {
     const nextLines = lines.filter((_line, index) => index !== target.lineIndex)
     const nextRaw = nextLines.length === 0 ? '' : `${nextLines.join('\n').replace(/\n+$/, '')}\n`
-    await atomicWriteFile(profilePath(home), nextRaw)
-    return { ok: true, id: targetId, retired: target, raw: nextRaw }
+    return { ok: true, id: targetId, retired: target, raw: nextRaw, estimatedTokens: estimateTokens(nextRaw) }
   }
 
   if (op === 'replace') {
@@ -186,9 +183,45 @@ export async function applyProfileMutation(home, mutation, { maxTokens = 2000, a
         maxTokens,
       }
     }
-    await atomicWriteFile(profilePath(home), nextRaw)
     return { ok: true, id, replaced: target, raw: nextRaw, estimatedTokens }
   }
 
   return { ok: false, reason: `UNSUPPORTED_OP:${op}` }
+}
+
+export function previewProfileBatch(currentRaw, mutations, { maxTokens = 2000, allowPinned = false } = {}) {
+  let workingRaw = String(currentRaw ?? '')
+  const applied = []
+  for (const mutation of mutations) {
+    const planned = planProfileMutation(workingRaw, mutation, { maxTokens, allowPinned })
+    if (!planned.ok) {
+      return planned
+    }
+    workingRaw = planned.raw
+    applied.push({ id: planned.id, section: mutation.section || DEFAULT_SECTION, content: String(mutation.content ?? '').trim() })
+  }
+  return {
+    ok: true,
+    raw: workingRaw,
+    applied,
+    estimatedTokens: estimateTokens(workingRaw),
+  }
+}
+
+export async function applyProfileBatch(home, mutations, { maxTokens = 2000, allowPinned = false } = {}) {
+  if (!Array.isArray(mutations) || mutations.length === 0) {
+    const raw = readProfile(home)
+    return { ok: true, raw, applied: [], estimatedTokens: estimateTokens(raw) }
+  }
+  const planned = previewProfileBatch(readProfile(home), mutations, { maxTokens, allowPinned })
+  if (!planned.ok) return planned
+  await atomicWriteFile(profilePath(home), planned.raw)
+  return planned
+}
+
+export async function applyProfileMutation(home, mutation, { maxTokens = 2000, allowPinned = false } = {}) {
+  const planned = planProfileMutation(readProfile(home), mutation, { maxTokens, allowPinned })
+  if (!planned.ok) return planned
+  await atomicWriteFile(profilePath(home), planned.raw)
+  return planned
 }

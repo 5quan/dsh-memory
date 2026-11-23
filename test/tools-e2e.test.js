@@ -107,12 +107,13 @@ function createE2eHarness(t, clock) {
   return { home, rt, tools, promptSections, emitSessionEvent, runTool }
 }
 
-test('E2E workflow across all 9 M1+M2 tools including buffer, digest, history, entities, search, mode switch, and forget', async (t) => {
+test('E2E workflow across all 11 M1+M2+M3 tools including onboarding, briefing, correction, buffer, digest, history, entities, search, mode switch, and forget', async (t) => {
   let nowMs = Date.parse('2026-11-21T16:00:00+08:00')
   const clock = { now: () => nowMs }
   const { rt, tools, emitSessionEvent, runTool } = createE2eHarness(t, clock)
 
   assert.deepEqual([...tools.keys()].sort(), [
+    'memory_briefing',
     'memory_buffer_add',
     'memory_buffer_manage',
     'memory_digest_now',
@@ -121,6 +122,7 @@ test('E2E workflow across all 9 M1+M2 tools including buffer, digest, history, e
     'memory_history_browse',
     'memory_journal_read',
     'memory_mode_set',
+    'memory_onboarding',
     'memory_search',
   ])
 
@@ -237,4 +239,45 @@ test('E2E workflow across all 9 M1+M2 tools including buffer, digest, history, e
   await runTool('memory_mode_set', { mode: 'off', scope: 'session' })
   const blockedSearch = await runTool('memory_search', { query: '汇报' })
   assert.equal(blockedSearch.includes('disabled'), true)
+
+  // 7. M3 workflow on active session: onboarding, auto-correction capture, morning briefing & immediate settlement
+  const m3Session = { id: 'm3-session', header: { id: 'm3-session' } }
+  const onbStatus = await runTool('memory_onboarding', { action: 'status' }, 'm3-session')
+  assert.equal(onbStatus.includes('Onboarding status: pending'), true)
+
+  const onbSubmit = await runTool('memory_onboarding', {
+    action: 'submit',
+    identity: '使用 Windows 11 开发环境',
+    rules: '绝不直接改写已冻结的 PROFILE.md',
+    writeMode: 'buffer',
+  }, 'm3-session')
+  assert.equal(onbSubmit.includes('Onboarding completed'), true)
+  assert.equal(onbSubmit.includes('queued 2 explicit item(s)'), true)
+
+  emitSessionEvent(m3Session, {
+    type: 'user/message',
+    seq: 1,
+    time: nowMs + 2000,
+    surfaceOp: 'append',
+    data: { id: 'u3', role: 'user', content: [{ type: 'text', text: '不对，以后一律先运行测试再总结。' }], source: { kind: 'user' } },
+  })
+  await rt.ingestApi.flush()
+
+  const briefingGet = await runTool('memory_briefing', { action: 'get' }, 'm3-session')
+  assert.equal(briefingGet.includes('每日记忆晨报'), true)
+  assert.equal(briefingGet.includes('不对，以后一律先运行测试再总结'), true)
+
+  const corrItem = rt.bufferApi.listItems({ statuses: ['pending'] }).find(i => i.source_type === 'correction')
+  assert.ok(corrItem)
+  assert.equal(corrItem.anchor, 'chat://2026-11-22#m3-session#1')
+
+  const briefingConfirm = await runTool('memory_briefing', {
+    action: 'confirm',
+    approveIds: [corrItem.id],
+    settleNow: true,
+    reason: '晨报勾选确认',
+  }, 'm3-session')
+  assert.equal(briefingConfirm.includes('approved=1'), true)
+  assert.equal(briefingConfirm.includes('Immediate settlement committed'), true)
+  assert.equal(rt.profileApi.readProfile(rt.config.home).includes('以后一律先运行测试再总结'), true)
 })

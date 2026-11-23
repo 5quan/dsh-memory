@@ -16,7 +16,7 @@
 |---|---|---|
 | **M1** | ✅ 已完成 | 原文档案采集（`user-only` 子会话过滤 + 三态无痕）、空闲切日（日内分块 + 锚点核验）与 6 段式不可变日报、按日追加缓冲区、按 `(session, logical_date)` 冻结前缀 + 持久化动态增量（Compaction 重置）、7 个基础记忆工具（含 `memory_forget`） |
 | **M2** | ✅ 已完成 | 历史记忆层引入 OpenViking L0/L1/L2 渐进披露（无向量单跳派生、`memory_history_browse`）与总览注入；`entities/` 实体档案卡、`target: entity:<名称>` 结算、别名精准触发动态注入与 `memory_entity_manage` |
-| **M3** | 📋 规划中 | 初始画像冷启动引导（首次空画像问卷/弹窗采集）、每日晨报确认体验（低摩擦批量勾选缓冲区）、轻量纠偏捕获，以及供上层 Bot 单向绑定的公开 Cordis 服务与事件契约 |
+| **M3** | ✅ 已完成 | 初始画像冷启动引导（空画像首次加载触发、多端自适应 `show_view` / `ask_user` / `ask_user_question` / 文本问卷、跳过与重填、Prefix Cache 保护）、每日晨报确认体验（昨日亮点 + 批量 `approve`/`reject` + `settleNow`）、轻量纠偏捕获（`source_type: 'correction'` + 真实用户锚点），以及公开 Cordis 服务 `dshMemory` 与标准事件 `dsh-memory/day-rolled-over` |
 | **M4** | 📋 规划中 | Dream 后台异步整理机制（去重、矛盾提交缓冲确认、过期降级与 `retired.jsonl` 回滚） |
 
 ## 架构目录规划（运行时数据，默认 `$DSH_HOME/daily-memory/`）
@@ -30,8 +30,14 @@
 ├── history/                             # [派生 · M2] OpenViking L0/L1 历史总览索引
 ├── snapshots/                           # [派生] 按 (session_id, logical_date) 冻结的前缀快照
 ├── retired.jsonl                        # [主存储 · M4] 被取代/归档条目备份（可回滚）
-└── archive.sqlite                       # [主存储 + FTS 派生] messages 原文主表 + FTS5 trigram + 状态表
+└── archive.sqlite                       # [主存储 + FTS 派生] messages 原文主表 + FTS5 trigram + 状态/元信息表
 ```
+
+## 公开 Cordis 服务契约（`dshMemory`）
+
+- **服务名**：`SERVICE_NAME = 'dshMemory'`（通过 `ctx.provide('dshMemory', service)` 注册，零 `ds-bot` 依赖）。
+- **标准事件**：`DAY_ROLLED_OVER_EVENT = 'dsh-memory/day-rolled-over'`，载荷 `{ date, scope, journalPath, summary: { title, highlights, pendingBufferCount, text } }`。
+- **公开方法**：`getCurrentLogicalDate`、`getMorningBriefing`、`markBriefingDelivered`、`confirmBufferItems`、`matchEntities`、`getEntity`、`listEntities`、`submitBufferCandidate`、`getOnboardingState`、`submitOnboarding`、`skipOnboarding`、`resetOnboarding`。
 
 ## 文档
 

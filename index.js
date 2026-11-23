@@ -7,11 +7,15 @@ import * as entityApi from './src/entities.js'
 import { createBufferApi } from './src/buffer.js'
 import { createHistoryApi } from './src/history.js'
 import { createDigestApi } from './src/digest.js'
+import { createOnboardingApi } from './src/onboarding.js'
+import { createBriefingApi } from './src/briefing.js'
 import { createRolloverApi } from './src/rollover.js'
 import { createIngestApi } from './src/ingest.js'
 import { createContextApi } from './src/context.js'
 import { createToolsApi } from './src/tools.js'
+import { createPublicService, DAY_ROLLED_OVER_EVENT, SERVICE_NAME } from './src/service.js'
 
+export { DAY_ROLLED_OVER_EVENT, SERVICE_NAME }
 export const name = 'dsh-memory'
 export const inject = ['llm', 'tools', 'systemPrompt', 'sessions']
 
@@ -46,7 +50,38 @@ export function createMemoryRuntime(ctx, rawConfig = {}, deps = {}) {
     clock,
     warn,
   })
-  const contextApi = createContextApi({
+
+  // contextApi and onboardingApi/briefingApi cross-reference snapshot helpers
+  let contextApi
+  const snapshotFacade = {
+    hasSnapshot: (sessionId, logicalDate) => contextApi?.hasSnapshot?.(sessionId, logicalDate) ?? false,
+    invalidateSnapshots: opts => contextApi?.invalidateSnapshots?.(opts),
+  }
+
+  const onboardingApi = createOnboardingApi({
+    ctx,
+    config,
+    store,
+    profileApi,
+    bufferApi,
+    entityApi,
+    contextApi: snapshotFacade,
+    clock,
+    warn,
+  })
+  const briefingApi = createBriefingApi({
+    ctx,
+    config,
+    store,
+    journalApi,
+    bufferApi,
+    profileApi,
+    entityApi,
+    contextApi: snapshotFacade,
+    clock,
+  })
+
+  contextApi = createContextApi({
     ctx,
     config,
     store,
@@ -54,6 +89,8 @@ export function createMemoryRuntime(ctx, rawConfig = {}, deps = {}) {
     journalApi,
     bufferApi,
     entityApi,
+    onboardingApi,
+    briefingApi,
     clock,
     warn,
   })
@@ -63,6 +100,8 @@ export function createMemoryRuntime(ctx, rawConfig = {}, deps = {}) {
     store,
     digestApi,
     contextApi,
+    journalApi,
+    bufferApi,
     clock,
     onRollover: deps.onRollover,
     warn,
@@ -72,6 +111,7 @@ export function createMemoryRuntime(ctx, rawConfig = {}, deps = {}) {
     config,
     store,
     rolloverApi,
+    bufferApi,
     clock,
     warn,
   })
@@ -85,8 +125,24 @@ export function createMemoryRuntime(ctx, rawConfig = {}, deps = {}) {
     contextApi,
     historyApi,
     entityApi,
+    onboardingApi,
+    briefingApi,
+    profileApi,
     clock,
   })
+  const publicService = createPublicService({
+    config,
+    store,
+    bufferApi,
+    entityApi,
+    briefingApi,
+    onboardingApi,
+    clock,
+  })
+
+  if (typeof ctx?.provide === 'function') {
+    ctx.provide(SERVICE_NAME, publicService)
+  }
 
   ingestApi.install()
   contextApi.install()
@@ -116,14 +172,17 @@ export function createMemoryRuntime(ctx, rawConfig = {}, deps = {}) {
     historyApi,
     bufferApi,
     digestApi,
+    onboardingApi,
+    briefingApi,
     rolloverApi,
     ingestApi,
     contextApi,
     toolsApi,
+    service: publicService,
     whenReady: () => readyPromise,
   }
 }
 
 export function apply(ctx, config = {}) {
-  return createMemoryRuntime(ctx, config)
+  createMemoryRuntime(ctx, config)
 }

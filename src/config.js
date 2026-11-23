@@ -60,6 +60,9 @@ export function normalizeConfig(raw = {}) {
   const rawDigest = src.digest && typeof src.digest === 'object' ? src.digest : {}
   const rawSections = src.sections && typeof src.sections === 'object' ? src.sections : {}
   const rawBuffer = src.buffer && typeof src.buffer === 'object' ? src.buffer : {}
+  const rawOnboarding = src.onboarding && typeof src.onboarding === 'object' ? src.onboarding : {}
+  const rawBriefing = src.briefing && typeof src.briefing === 'object' ? src.briefing : {}
+  const rawCorrection = src.correction && typeof src.correction === 'object' ? src.correction : {}
   const rawLlm = src.llm && typeof src.llm === 'object' ? src.llm : {}
 
   return {
@@ -91,6 +94,18 @@ export function normalizeConfig(raw = {}) {
       requireConfirmOnOverwrite: typeof rawBuffer.requireConfirmOnOverwrite === 'boolean'
         ? rawBuffer.requireConfirmOnOverwrite
         : true,
+    },
+    onboarding: {
+      enabled: typeof rawOnboarding.enabled === 'boolean' ? rawOnboarding.enabled : true,
+    },
+    briefing: {
+      enabled: typeof rawBriefing.enabled === 'boolean' ? rawBriefing.enabled : true,
+    },
+    correction: {
+      autoCapture: typeof rawCorrection.autoCapture === 'boolean' ? rawCorrection.autoCapture : true,
+      defaultSection: typeof rawCorrection.defaultSection === 'string' && rawCorrection.defaultSection.trim() !== ''
+        ? rawCorrection.defaultSection.trim()
+        : '长期规矩与边界',
     },
     llm: {
       provider: typeof rawLlm.provider === 'string' && rawLlm.provider.trim() !== '' ? rawLlm.provider.trim() : undefined,
