@@ -12,6 +12,7 @@ import { detectUserCorrection } from '../src/correction.js'
 import * as entityApi from '../src/entities.js'
 import { createIngestApi } from '../src/ingest.js'
 import * as journalApi from '../src/journal.js'
+import { createOnboardingApi } from '../src/onboarding.js'
 import * as profileApi from '../src/profile.js'
 import { createMemoryStore } from '../src/store.js'
 import { createToolsApi } from '../src/tools.js'
@@ -350,4 +351,147 @@ test('morning briefing delivers once per day, summarizes yesterday highlights + 
   // Next logical day -> briefing becomes deliverable again if content exists
   nowMs = Date.parse('2026-11-24T08:30:00+08:00')
   assert.equal(briefingApi.shouldDeliverToday(), true)
+})
+
+test('morning briefing and onboarding skip non-user automated turns without consuming delivery', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-memory-nonuser-turn-'))
+  const clock = { now: () => Date.parse('2026-11-23T08:00:00+08:00') }
+  const config = normalizeConfig({ home: dir, timeZone: 'Asia/Shanghai' })
+  const store = createMemoryStore(join(dir, 'archive.sqlite'))
+  const preStepHandlers = []
+
+  const ctx = {
+    effect(fn) { return fn() },
+    systemPrompt: { section() { return () => {} } },
+    on(eventName, fn) {
+      if (eventName === 'agent/pre-step') preStepHandlers.push(fn)
+      return () => {}
+    },
+    tools: {
+      get() { return undefined },
+    },
+  }
+
+  t.after(() => {
+    store.close()
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5 })
+  })
+
+  await journalApi.writeJournalAtomic(dir, '2026-11-22', [
+    '# 2026-11-22 日报',
+    '## 做出的决定',
+    '- [chat://2026-11-22#main#1] 保留晨报等待用户真实对话。',
+  ].join('\n'))
+
+  const bufferApi = createBufferApi({ home: dir, clock })
+  let contextApi
+  const snapshotFacade = {
+    hasSnapshot: (sid, d) => contextApi?.hasSnapshot?.(sid, d) ?? false,
+    invalidateSnapshots: opts => contextApi?.invalidateSnapshots?.(opts),
+  }
+  const briefingApi = createBriefingApi({
+    ctx,
+    config,
+    store,
+    journalApi,
+    bufferApi,
+    profileApi,
+    entityApi,
+    contextApi: snapshotFacade,
+    clock,
+  })
+  const onboardingApi = createOnboardingApi({
+    ctx,
+    config,
+    store,
+    profileApi,
+    bufferApi,
+    entityApi,
+    contextApi: snapshotFacade,
+    clock,
+  })
+  contextApi = createContextApi({
+    ctx,
+    config,
+    store,
+    profileApi,
+    journalApi,
+    bufferApi,
+    entityApi,
+    onboardingApi,
+    briefingApi,
+    clock,
+  })
+  contextApi.install()
+
+  assert.equal(briefingApi.shouldDeliverToday(), true)
+  assert.equal(onboardingApi.shouldPromptForSession('chief'), true)
+
+  const preStep = preStepHandlers[0]
+  const agent = { id: 'chief', session: { surface: { replaceGeneration: 0 } } }
+
+  const nonInteractiveCases = [
+    {
+      name: 'scheduled reminder',
+      step: 1,
+      message: {
+        role: 'user',
+        source: { kind: 'schedule' },
+        content: [{ type: 'text', text: '[SCHEDULE REMINDER]\nreminder_prompt_json: "run follow-builders"' }],
+      },
+    },
+    {
+      name: 'bot handoff',
+      step: 1,
+      message: {
+        role: 'user',
+        source: { kind: 'bot', handoff: true },
+        content: [{ type: 'text', text: '[Handoff]' }],
+      },
+    },
+    {
+      name: 'notice-only message',
+      step: 1,
+      message: {
+        role: 'user',
+        source: { kind: 'dsh-ctrl/briefing', form: 'notice' },
+        content: [{ type: 'text', text: 'notice' }],
+      },
+    },
+    {
+      name: 'multi-step continuation',
+      step: 2,
+      message: {
+        role: 'user',
+        source: { kind: 'user' },
+        content: [{ type: 'text', text: 'tool follow-up' }],
+      },
+    },
+  ]
+
+  for (const item of nonInteractiveCases) {
+    const res = await preStep(
+      { agent, step: item.step },
+      async () => ({ kind: 'enter', messages: [item.message] }),
+    )
+    assert.equal(res.messages.length, 1, item.name)
+    assert.equal(briefingApi.shouldDeliverToday(), true, `${item.name} must not consume briefing`)
+    assert.equal(onboardingApi.shouldPromptForSession('chief'), true, `${item.name} must not consume onboarding`)
+  }
+
+  const realUserMsg = {
+    role: 'user',
+    source: { kind: 'user' },
+    content: [{ type: 'text', text: '早安' }],
+  }
+  const userStep = await preStep(
+    { agent, step: 1 },
+    async () => ({ kind: 'enter', messages: [realUserMsg] }),
+  )
+  assert.equal(userStep.messages.length, 2)
+  assert.equal(userStep.messages[0].source.kind, 'dsh-memory/delta')
+  assert.equal(userStep.messages[0].content[0].text.includes('每日晨报与待确认记忆'), true)
+  assert.equal(userStep.messages[0].content[0].text.includes('初始画像冷启动引导'), true)
+  assert.equal(briefingApi.shouldDeliverToday(), false)
+  assert.equal(onboardingApi.shouldPromptForSession('chief'), false)
 })

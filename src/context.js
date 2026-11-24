@@ -312,11 +312,24 @@ export function createContextApi({
     return built
   }
 
+  const INTERACTIVE_USER_KINDS = new Set(['user', 'user-question-reply'])
+
+  function hasInteractiveUserMessage(messages) {
+    if (!Array.isArray(messages)) return false
+    return messages.some((msg) => {
+      if (msg?.role !== 'user') return false
+      if (msg?.source?.form === 'notice') return false
+      const kind = msg?.source?.kind
+      return kind === undefined || INTERACTIVE_USER_KINDS.has(kind)
+    })
+  }
+
   function latestUserPromptText(messages) {
     if (!Array.isArray(messages)) return ''
     for (let i = messages.length - 1; i >= 0; i -= 1) {
       const msg = messages[i]
       if (msg?.role !== 'user') continue
+      if (msg?.source?.form === 'notice') continue
       const kind = msg?.source?.kind
       if (typeof kind === 'string' && kind.startsWith('dsh-memory/')) continue
       const text = extractTextBlocks(msg.content).trim()
@@ -366,7 +379,9 @@ export function createContextApi({
 
     let briefingNotice = ''
     let onboardingNotice = ''
-    const allowInteractiveNotices = mode === 'full' && options.isSubagent !== true
+    const allowInteractiveNotices = mode === 'full'
+      && options.isSubagent !== true
+      && options.isInteractiveTurn !== false
     if (allowInteractiveNotices) {
       const uiMode = options.uiMode ?? detectSessionUiMode(ctx, options.agent)
       if (briefingApi && briefingApi.shouldDeliverToday({ scope })) {
@@ -467,7 +482,7 @@ export function createContextApi({
       text: context => sectionFor(context?.agent?.id),
     }), 'dsh-memory: frozen system prompt section')
 
-    ctx.effect(() => ctx.on('agent/pre-step', async ({ agent }, next) => {
+    ctx.effect(() => ctx.on('agent/pre-step', async ({ agent, step }, next) => {
       const decision = await next()
       if (decision?.kind !== 'enter' || !Array.isArray(decision.messages)) return decision
 
@@ -481,9 +496,11 @@ export function createContextApi({
       const currentGen = Number(agent?.session?.surface?.replaceGeneration ?? 0)
       const latestUserText = latestUserPromptText(decision.messages)
       const isSubagent = agent?.session?.header?.origin === 'subagent'
+      const isInteractiveTurn = (step === undefined || step === 1) && hasInteractiveUserMessage(decision.messages)
       const deltaMsg = buildDeltaForSession(sessionId, scope, currentGen, latestUserText, {
         agent,
         isSubagent,
+        isInteractiveTurn,
       })
       if (!deltaMsg) return decision
 
