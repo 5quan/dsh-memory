@@ -24,7 +24,7 @@
 | **M4** | ✅ 已完成 | 规则 + LLM 双通道 Dream（`dream.lock`、失败不推水位、无证据不动、冲突标 `[CONFLICT]`、`expires` 到期淘汰、`rejectCooldownDays` 冷却期、`maxChangeRatio` 上限与 `retired.jsonl` 通用回滚）、`memory_read_context` 行窗口邻接扩展、`guard.js` 幂等去重与凭据“只记名不记值”拦截、`memory_forget` 补清 `PROFILE.md`/`retired.jsonl`，以及离线/在线消融评测脚本 |
 | **M5** | ✅ 已完成 | 避坑经验与程序性记忆（`lessons/*.md`、`target: 'lesson:<名称>'`、标签/触发词动态召回、`memory_lesson_manage`，`dshMemory` 新增 `matchLessons`/`getLesson`/`listLessons` 供 Worker 与原版 DSH 复用；可执行技能留在执行层） |
 | **M5.5** | ✅ 已完成 | DSH 原生 `.volatile()` 实时设置开关（`export const Config` 自动投影设置页）、`dream.useLlm` 分级默认关闭策略（`false`）、`dshMemory.getSettingsSnapshot()` 与本使用说明书 |
-| **后续规划（Issue `#9`）** | 📝 已记录 | 全系统流程与提示词审查优化（修复 Dream 日报截断 + 借鉴 Anthropic Dreaming/Knowledge Wiki + 精简检索引导）、冻结前缀闲置指纹刷新、可选本地 SQLite 向量+RRF 混合检索、写入侧投毒拦截与红队验收 |
+| **后续规划（Issue `#9`）** | 📝 已记录 | 全系统流程与提示词审查优化（修复 Dream 日报截断 + 借鉴 Anthropic Dreaming/Knowledge Wiki + 精简检索引导）、工作/聊天模式分化与防无关项目串台（差异化提示词 + `archived` 静默）、冻结前缀闲置指纹刷新、可选本地 SQLite 向量+RRF 混合检索、写入侧投毒拦截与红队验收 |
 
 ---
 
@@ -215,9 +215,10 @@
   ```
 - **后续专项梳理与演进方向（已登记于 [Issue #9](https://github.com/5quan/dsh-memory/issues/9) 与 [架构设计说明书 §3.9](docs/DESIGN.md)）**：
   1. 全系统流程合理性专项审查与 Digest / Dream / `USAGE_GUIDANCE` 提示词调优（含修复 Dream 日报头部截断隐患）；
-  2. 冻结前缀按闲置时长 + 内容哈希指纹刷新机制（`snapshotRefreshIdleMinutes`）；
-  3. 可选本地 SQLite BLOB 向量 + RRF 混合重排派生检索（零外部向量库、默认关闭、由真实消融数据驱动）；
-  4. 写入侧记忆投毒 / 提示注入专项拦截与红队验收。
+  2. 无痕模式演进为**工作模式 / 聊天模式**（保留无痕兜底），针对性调整注入与提示词、抑制已完结或不相关项目主动串台（含 `archived` 静默归档）；
+  3. 冻结前缀按闲置时长 + 内容哈希指纹刷新机制（`snapshotRefreshIdleMinutes`）；
+  4. 可选本地 SQLite BLOB 向量 + RRF 混合重排派生检索（零外部向量库、默认关闭、由真实消融数据驱动）；
+  5. 写入侧记忆投毒 / 提示注入专项拦截与红队验收。
 
 ## 延伸文档
 
