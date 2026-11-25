@@ -98,10 +98,13 @@ function createE2eHarness(t, clock) {
   const emitSessionEvent = (session, event) => {
     for (const fn of listeners.get('session/event') ?? []) fn(session, event)
   }
-  const runTool = async (name, args, sessionId = 'main') => {
+  const runTool = async (name, args, sessionId = 'main', sessionHeader) => {
     const tool = tools.get(name)
     assert.ok(tool, `tool ${name} should be registered`)
-    return await tool.execute(args, { agent: { id: sessionId }, signal: new AbortController().signal })
+    const agent = sessionHeader
+      ? { id: sessionId, session: { header: sessionHeader } }
+      : { id: sessionId }
+    return await tool.execute(args, { agent, signal: new AbortController().signal })
   }
 
   return { home, rt, tools, promptSections, emitSessionEvent, runTool }
@@ -370,4 +373,196 @@ test('E2E workflow across all 15 M1-M5 tools including lessons, context expansio
 
   const lesRead = await runTool('memory_lesson_manage', { action: 'read', name: 'Windows 测试脚本' }, 'm3-session')
   assert.equal(lesRead.includes('store.close()'), true)
+})
+
+test('memory_search searches entities/ and lessons/ bodies with AND priority, OR fallback, and Card Matches grouping', async (t) => {
+  const nowMs = Date.parse('2026-11-24T10:00:00+08:00')
+  const clock = { now: () => nowMs }
+  const { rt, emitSessionEvent, runTool } = createE2eHarness(t, clock)
+
+  emitSessionEvent({ id: 'main', header: { id: 'main' } }, {
+    type: 'user/message',
+    seq: 1,
+    time: nowMs,
+    surfaceOp: 'append',
+    data: { id: 'u1', role: 'user', content: [{ type: 'text', text: '今日同步了例行巡检计划。' }], source: { kind: 'user' } },
+  })
+  await rt.journalApi.writeJournalAtomic(rt.config.home, '2026-11-23', '# 2026-11-23 日报\n## 发生了什么\n- 例行巡检记录。\n')
+
+  await rt.entityApi.upsertEntity(rt.config.home, {
+    name: '数据库主机',
+    type: 'server',
+    aliases: ['ProdDB'],
+    content: 'PostgreSQL 端口 15432，主备同步。',
+    added: '2026-11-24',
+    source: 'manual',
+  })
+  await rt.lessonApi.upsertLesson(rt.config.home, {
+    name: '代理排障',
+    tags: ['proxy'],
+    triggers: ['gateway'],
+    content: '遇到 ECONNREFUSED 时核对端口 15432 配置。',
+    added: '2026-11-24',
+    source: 'manual',
+  })
+
+  // Single-term card-body match returns both entity and lesson under Card Matches
+  const portSearch = await runTool('memory_search', { query: '15432' })
+  assert.equal(portSearch.includes('### Card Matches'), true)
+  assert.equal(portSearch.includes('[entity:数据库主机'), true)
+  assert.equal(portSearch.includes('[lesson:代理排障'), true)
+
+  // Card-only match works even when archive and journals have 0 hits
+  const errSearch = await runTool('memory_search', { query: 'ECONNREFUSED' })
+  assert.equal(errSearch.includes('### Card Matches'), true)
+  assert.equal(errSearch.includes('[lesson:代理排障'), true)
+  assert.equal(errSearch.includes('### Journal Matches'), false)
+  assert.equal(errSearch.includes('### Archive Matches'), false)
+
+  // Strict AND across header + body filters out partial match on other card
+  const strictAnd = await runTool('memory_search', { query: 'ProdDB 15432' })
+  assert.equal(strictAnd.includes('[entity:数据库主机'), true)
+  assert.equal(strictAnd.includes('[lesson:代理排障'), false)
+
+  // Multi-term OR coverage fallback ranks 2-term lesson match above 1-term entity match
+  const orSearch = await runTool('memory_search', { query: 'ECONNREFUSED 15432 不存在词' })
+  const lesIdx = orSearch.indexOf('[lesson:代理排障')
+  const entIdx = orSearch.indexOf('[entity:数据库主机')
+  assert.equal(lesIdx !== -1 && entIdx !== -1 && lesIdx < entIdx, true)
+
+  // Empty-query browse by date skips cards
+  const browseOut = await runTool('memory_search', { dateFrom: '2026-11-24', dateTo: '2026-11-24' })
+  assert.equal(browseOut.includes('### Archive Matches'), true)
+  assert.equal(browseOut.includes('### Card Matches'), false)
+
+  // Redacting card body via memory_forget removes it from memory_search
+  await runTool('memory_forget', { keyword: 'ECONNREFUSED' })
+  const afterForget = await runTool('memory_search', { query: 'ECONNREFUSED' })
+  assert.equal(afterForget.includes('No memory matches found'), true)
+})
+
+test('subagent sessions enforce read-only boundary across all 15 memory_* tools', async (t) => {
+  const nowMs = Date.parse('2026-11-24T11:00:00+08:00')
+  const clock = { now: () => nowMs }
+  const { rt, emitSessionEvent, runTool } = createE2eHarness(t, clock)
+
+  const mainSession = { id: 'main', header: { id: 'main' } }
+  emitSessionEvent(mainSession, {
+    type: 'user/message',
+    seq: 1,
+    time: nowMs,
+    surfaceOp: 'append',
+    data: { id: 'u1', role: 'user', content: [{ type: 'text', text: '核心数据库端口 15432 用于只读验收。' }], source: { kind: 'user' } },
+  })
+  await rt.journalApi.writeJournalAtomic(rt.config.home, '2026-11-23', '# 2026-11-23 日报\n## 发生了什么\n- [chat://2026-11-23#main#1] 初始化测试日记。\n')
+  await rt.historyApi.rebuildAllHistory()
+  await rt.entityApi.upsertEntity(rt.config.home, {
+    name: 'ProdDB',
+    type: 'server',
+    aliases: ['主库'],
+    content: 'PostgreSQL 端口 15432',
+    added: '2026-11-24',
+    source: 'manual',
+  })
+  await rt.lessonApi.upsertLesson(rt.config.home, {
+    name: '代理排障',
+    tags: ['proxy'],
+    triggers: ['502'],
+    content: '检查端口 15432 是否开启',
+    added: '2026-11-24',
+    source: 'manual',
+  })
+  const addedProf = await rt.profileApi.applyProfileMutation(rt.config.home, {
+    op: 'add',
+    section: '长期规矩与边界',
+    content: '保留旧规则用于回滚基线',
+    added: '2026-11-23',
+    source: 'manual',
+  })
+  await rt.profileApi.applyProfileMutation(rt.config.home, {
+    op: 'retire',
+    targetId: addedProf.id,
+    nowIso: '2026-11-24T00:00:00.000Z',
+  })
+  const bufItem = await rt.bufferApi.appendCreate({
+    logicalDate: '2026-11-24',
+    sourceType: 'extracted',
+    target: 'profile',
+    content: '主会话待审核条目',
+  })
+
+  const subSid = 'sub-readonly-1'
+  const subHeader = { id: subSid, origin: 'subagent', parentSession: 'main' }
+
+  // 1. All 6 read-only tool operations succeed in subagent sessions
+  const searchRes = await runTool('memory_search', { query: '15432' }, subSid, subHeader)
+  assert.equal(searchRes.includes('### Card Matches'), true)
+  assert.equal(searchRes.includes('### Archive Matches'), true)
+
+  const ctxRes = await runTool('memory_read_context', { anchor: 'chat://2026-11-24#main#1' }, subSid, subHeader)
+  assert.equal(ctxRes.includes('核心数据库端口 15432'), true)
+
+  const jrListRes = await runTool('memory_journal_read', {}, subSid, subHeader)
+  assert.equal(jrListRes.includes('2026-11-23'), true)
+  const jrReadRes = await runTool('memory_journal_read', { date: '2026-11-23' }, subSid, subHeader)
+  assert.equal(jrReadRes.includes('初始化测试日记'), true)
+
+  const histListRes = await runTool('memory_history_browse', { action: 'list' }, subSid, subHeader)
+  assert.equal(histListRes.includes('2026-11'), true)
+  const histReadRes = await runTool('memory_history_browse', { action: 'read', month: '2026-11' }, subSid, subHeader)
+  assert.equal(histReadRes.includes('2026-11 History'), true)
+
+  const entListRes = await runTool('memory_entity_manage', { action: 'list' }, subSid, subHeader)
+  assert.equal(entListRes.includes('ProdDB'), true)
+  const entReadRes = await runTool('memory_entity_manage', { action: 'read', name: 'ProdDB' }, subSid, subHeader)
+  assert.equal(entReadRes.includes('15432'), true)
+
+  const lesListRes = await runTool('memory_lesson_manage', { action: 'list' }, subSid, subHeader)
+  assert.equal(lesListRes.includes('代理排障'), true)
+  const lesReadRes = await runTool('memory_lesson_manage', { action: 'read', name: '代理排障' }, subSid, subHeader)
+  assert.equal(lesReadRes.includes('15432'), true)
+
+  // 2. All write/delete/admin tool operations return Refused and leave state untouched
+  const refusedCalls = [
+    ['memory_forget', { keyword: '15432' }],
+    ['memory_buffer_add', { content: 'subagent 试图写入', sourceType: 'explicit' }],
+    ['memory_buffer_manage', { action: 'list' }],
+    ['memory_buffer_manage', { action: 'approve', ids: [bufItem.id], settleNow: true }],
+    ['memory_buffer_manage', { action: 'reject', ids: [bufItem.id] }],
+    ['memory_mode_set', { mode: 'off', scope: 'session' }],
+    ['memory_mode_set', { mode: 'off', scope: 'global' }],
+    ['memory_digest_now', { date: '2026-11-24' }],
+    ['memory_onboarding', { action: 'status' }],
+    ['memory_onboarding', { action: 'submit', identity: 'hijack' }],
+    ['memory_onboarding', { action: 'skip' }],
+    ['memory_onboarding', { action: 'reset' }],
+    ['memory_briefing', { action: 'get' }],
+    ['memory_briefing', { action: 'confirm', approveIds: [bufItem.id] }],
+    ['memory_briefing', { action: 'dismiss' }],
+    ['memory_dream_now', { dryRun: true }],
+    ['memory_dream_now', { dryRun: false }],
+    ['memory_rollback', { entryId: addedProf.id }],
+    ['memory_history_browse', { action: 'rebuild' }],
+    ['memory_entity_manage', { action: 'upsert', name: 'ProdDB', content: 'tampered' }],
+    ['memory_entity_manage', { action: 'delete', name: 'ProdDB', force: true }],
+    ['memory_lesson_manage', { action: 'upsert', name: '代理排障', content: 'tampered' }],
+    ['memory_lesson_manage', { action: 'delete', name: '代理排障', force: true }],
+  ]
+
+  for (const [toolName, args] of refusedCalls) {
+    const out = await runTool(toolName, args, subSid, subHeader)
+    assert.equal(out.startsWith('Refused:'), true, `${toolName}(${JSON.stringify(args)}) should be refused in subagent, got: ${out}`)
+  }
+
+  // Verify zero mutations occurred
+  assert.equal(rt.store.getMessagesForDate('2026-11-24').length, 1)
+  assert.equal(rt.bufferApi.listItems({ logicalDate: '2026-11-24' }).length, 1)
+  assert.equal(rt.bufferApi.listItems({ logicalDate: '2026-11-24' })[0].status, 'pending')
+  assert.equal(rt.config.defaultMode, 'full')
+  assert.equal(rt.store.getSessionState(subSid)?.memoryMode, undefined)
+  assert.equal(rt.entityApi.readEntity(rt.config.home, 'ProdDB').facts.length, 1)
+  assert.equal(rt.lessonApi.readLesson(rt.config.home, '代理排障').entries.length, 1)
+  assert.equal(rt.profileApi.readProfile(rt.config.home).includes('保留旧规则'), false)
+  assert.equal(rt.journalApi.readJournal(rt.config.home, '2026-11-24'), '')
+  assert.equal(rt.briefingApi.shouldDeliverToday(), true)
 })

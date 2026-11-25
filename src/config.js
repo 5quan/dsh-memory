@@ -20,6 +20,7 @@ export const Config = z.object({
   idleMinutes: z.number().min(1).default(30).volatile().description('自动触发昨日日结所需的连续空闲分钟数'),
   ingest: z.object({
     subagentPolicy: z.union(['user-only', 'ignore', 'all']).default('user-only').description('子代理会话采集策略'),
+    injectSubagentContext: z.boolean().default(false).volatile().description('是否为 subagent 子代理会话注入冻结前缀与动态记忆增量（默认关闭，仅保留按需工具查询与用户纠偏采集）'),
     includeScopes: z.array(z.string()).default(['default']).description('纳入采集与检索的 scope 白名单'),
     excludeSessionIds: z.array(z.string()).default([]).description('显式排除采集的会话 ID 列表'),
   }).description('原文采集范围与子会话过滤'),
@@ -231,6 +232,7 @@ export function normalizeConfig(raw = {}) {
   defineLiveField(config, 'defaultMode', src.defaultMode, v => (VALID_MEMORY_MODES.has(v) ? v : 'full'))
   defineLiveField(config, 'dayStartHour', src.dayStartHour, v => nonNegativeHour(v, 2))
   defineLiveField(config, 'idleMinutes', src.idleMinutes, v => positiveNumber(v, 30))
+  defineLiveField(config.ingest, 'injectSubagentContext', ingestObj.injectSubagentContext, v => boolOr(v, false))
 
   defineLiveField(config.buffer, 'autoCommitSources', rawBuffer.autoCommitSources, v => stringList(v, ['explicit']))
   defineLiveField(config.buffer, 'requireConfirmOnOverwrite', rawBuffer.requireConfirmOnOverwrite, v => boolOr(v, true))
@@ -267,6 +269,10 @@ export function snapshotLiveConfig(config) {
     defaultMode: config.defaultMode,
     dayStartHour: config.dayStartHour,
     idleMinutes: config.idleMinutes,
+    ingest: {
+      subagentPolicy: config.ingest.subagentPolicy,
+      injectSubagentContext: config.ingest.injectSubagentContext,
+    },
     onboarding: { enabled: config.onboarding.enabled },
     briefing: { enabled: config.briefing.enabled },
     correction: {

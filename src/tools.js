@@ -9,6 +9,46 @@ const stringOutput = {
   render: (_args, value) => [{ type: 'text', text: String(value) }],
 }
 
+const SUBAGENT_READ_ONLY_TOOLS = new Set([
+  'memory_search',
+  'memory_read_context',
+  'memory_journal_read',
+])
+const SUBAGENT_READ_ONLY_ACTIONS = new Map([
+  ['memory_history_browse', new Set(['list', 'read'])],
+  ['memory_entity_manage', new Set(['list', 'read'])],
+  ['memory_lesson_manage', new Set(['list', 'read'])],
+])
+
+function isSubagentExec(exec) {
+  return exec?.agent?.session?.header?.origin === 'subagent'
+}
+
+function subagentDenialMessage(toolName, args, exec) {
+  if (!isSubagentExec(exec)) return null
+  if (SUBAGENT_READ_ONLY_TOOLS.has(toolName)) return null
+  const allowedActions = SUBAGENT_READ_ONLY_ACTIONS.get(toolName)
+  const action = typeof args?.action === 'string' ? args.action.trim() : ''
+  if (allowedActions && allowedActions.has(action)) return null
+  const actionSuffix = action ? ` (action="${action}")` : ''
+  const hint = allowedActions
+    ? ` Subagent sessions may only run read-only actions (${[...allowedActions].join('/')}) on ${toolName}.`
+    : ' Subagent sessions are restricted to read-only memory queries (memory_search, memory_read_context, memory_journal_read, memory_history_browse(list/read), memory_entity_manage(list/read), memory_lesson_manage(list/read)).'
+  return `Refused: "${toolName}"${actionSuffix} is not permitted in subagent sessions.${hint}`
+}
+
+function defineMemoryTool(spec) {
+  const { execute, ...rest } = spec
+  return defineTool({
+    ...rest,
+    async execute(args, exec) {
+      const denied = subagentDenialMessage(spec.name, args, exec)
+      if (denied) return denied
+      return await execute(args, exec)
+    },
+  })
+}
+
 function formatContextWindowLines(ctxRes, { maxCharsPerMessage = 800, maxTotalChars = 6000 } = {}) {
   if (!ctxRes?.target) return []
   const targetIdx = ctxRes.messages.findIndex(m => m.anchor === ctxRes.target.anchor)
@@ -70,9 +110,9 @@ export function createToolsApi({
   }
 
   const tools = [
-    defineTool({
+    defineMemoryTool({
       name: 'memory_search',
-      description: 'Search historical conversation transcripts (FTS5 trigram + LIKE, with multi-term OR fallback ranked by coverage) and daily journals by keyword or date range. Omit query to browse recent archived messages by date range. Returns snippets with exact chat:// anchors.',
+      description: 'Search historical conversation transcripts (FTS5 trigram + LIKE, with multi-term OR fallback ranked by coverage), daily journals, and entity/lesson card bodies by keyword or date range. Omit query to browse recent archived messages by date range. Returns snippets with exact chat:// anchors and card references.',
       parameters: {
         query: { type: 'string', description: 'Optional keywords or phrase to search. Omit to browse recent archived messages in the date range (defaults up to today).' },
         dateFrom: { type: 'string', description: 'Optional inclusive start date (YYYY-MM-DD).' },
@@ -113,14 +153,41 @@ export function createToolsApi({
             limit,
           })
           : []
+        const entityHits = rawQuery && entityApi?.searchEntities
+          ? entityApi.searchEntities(config.home, { query: rawQuery, limit })
+          : []
+        const lessonHits = rawQuery && lessonApi?.searchLessons
+          ? lessonApi.searchLessons(config.home, { query: rawQuery, limit })
+          : []
+        const combinedCardHits = [...entityHits, ...lessonHits]
+        const andCardHits = combinedCardHits.filter(hit => hit.isAndMatch)
+        const cardHits = (andCardHits.length > 0 ? andCardHits : combinedCardHits)
+          .sort((a, b) =>
+            b.matchedCount - a.matchedCount
+            || b.matchedChars - a.matchedChars
+            || (b.bodyMatchedCount ?? 0) - (a.bodyMatchedCount ?? 0)
+            || a.kind.localeCompare(b.kind)
+            || a.slug.localeCompare(b.slug))
+          .slice(0, limit)
 
-        if (msgHits.length === 0 && journalHits.length === 0) {
+        if (msgHits.length === 0 && journalHits.length === 0 && cardHits.length === 0) {
           return rawQuery
             ? `No memory matches found for "${rawQuery}".`
             : 'No archived messages found for the specified date range.'
         }
 
         const sections = []
+        if (cardHits.length > 0) {
+          sections.push(
+            '### Card Matches',
+            ...cardHits.map((hit) => {
+              const meta = [hit.kind === 'entity' ? `entity:${hit.name}` : `lesson:${hit.name}`]
+              if (hit.entryId) meta.push(hit.entryId)
+              if (hit.source) meta.push(hit.source)
+              return `- [${meta.join(' · ')}] ${hit.snippet}`
+            }),
+          )
+        }
         if (journalHits.length > 0) {
           sections.push(
             '### Journal Matches',
@@ -151,7 +218,7 @@ export function createToolsApi({
       },
     }),
 
-    defineTool({
+    defineMemoryTool({
       name: 'memory_read_context',
       description: 'Expand surrounding archived conversation turns (before and after) around a specific chat:// anchor using row-window queries.',
       parameters: {
@@ -192,7 +259,7 @@ export function createToolsApi({
       },
     }),
 
-    defineTool({
+    defineMemoryTool({
       name: 'memory_journal_read',
       description: 'Read the immutable daily journal for a specific date (YYYY-MM-DD), or list available journal dates when date is omitted.',
       parameters: {
@@ -219,7 +286,7 @@ export function createToolsApi({
       },
     }),
 
-    defineTool({
+    defineMemoryTool({
       name: 'memory_buffer_add',
       description: 'Add a memory item or user correction to the daily append-only buffer (never mutates PROFILE.md mid-day). Anchors are bound automatically from the live user message.',
       parameters: {
@@ -288,7 +355,7 @@ export function createToolsApi({
       },
     }),
 
-    defineTool({
+    defineMemoryTool({
       name: 'memory_buffer_manage',
       description: 'List, approve, or reject pending items in the daily memory buffer so the user can review and choose what gets committed. Note: "approve" marks items ready for settlement at daily rollover (preserving today\'s frozen prefix cache) unless settleNow is true.',
       parameters: {
@@ -367,7 +434,7 @@ export function createToolsApi({
       },
     }),
 
-    defineTool({
+    defineMemoryTool({
       name: 'memory_mode_set',
       description: 'Switch memory/incognito mode ("full", "read-only", or "off") for the current session or global default.',
       parameters: {
@@ -397,7 +464,7 @@ export function createToolsApi({
       },
     }),
 
-    defineTool({
+    defineMemoryTool({
       name: 'memory_digest_now',
       description: 'Manually trigger daily digest generation and buffer settlement for a logical date (defaults to yesterday).',
       parameters: {
@@ -451,7 +518,7 @@ export function createToolsApi({
       },
     }),
 
-    defineTool({
+    defineMemoryTool({
       name: 'memory_forget',
       description: 'Actively forget memories requested by the user: permanently deletes matching messages from archive and FTS5, rejects matching buffer items, redacts matching lines in daily journals, entities, lessons, and history index, removes matching entries from PROFILE.md and retired.jsonl, and invalidates snapshots.',
       parameters: {
@@ -562,7 +629,7 @@ export function createToolsApi({
       },
     }),
 
-    defineTool({
+    defineMemoryTool({
       name: 'memory_history_browse',
       description: 'Browse OpenViking L0/L1 historical memory index by month or rebuild it single-hop from immutable daily journals, then drill down to L2 with memory_journal_read.',
       parameters: {
@@ -627,7 +694,7 @@ export function createToolsApi({
       },
     }),
 
-    defineTool({
+    defineMemoryTool({
       name: 'memory_entity_manage',
       description: 'List, read, create/update, or delete entity memory cards (people, projects, servers) and their alias triggers.',
       parameters: {
@@ -698,7 +765,7 @@ export function createToolsApi({
       },
     }),
 
-    defineTool({
+    defineMemoryTool({
       name: 'memory_lesson_manage',
       description: 'List, read, create/update, or delete procedural lesson/pitfall cards in lessons/ along with their tags and trigger keywords.',
       parameters: {
@@ -777,7 +844,7 @@ export function createToolsApi({
       },
     }),
 
-    defineTool({
+    defineMemoryTool({
       name: 'memory_onboarding',
       description: 'Inspect status, run interactive questionnaire, submit initial profile answers, skip, or reset cold-start profile onboarding.',
       parameters: {
@@ -899,7 +966,7 @@ export function createToolsApi({
       },
     }),
 
-    defineTool({
+    defineMemoryTool({
       name: 'memory_briefing',
       description: 'Fetch daily morning briefing summary (yesterday journal highlights + pending buffer items), interactively or batch confirm/reject items, or dismiss today briefing.',
       parameters: {
@@ -977,7 +1044,7 @@ export function createToolsApi({
       },
     }),
 
-    defineTool({
+    defineMemoryTool({
       name: 'memory_dream_now',
       description: 'Manually trigger M4 Dream background consolidation (rule + optional LLM pass) to queue dedup, expiry, or conflict proposals into buffer without silently mutating PROFILE.md.',
       parameters: {
@@ -1030,7 +1097,7 @@ export function createToolsApi({
       },
     }),
 
-    defineTool({
+    defineMemoryTool({
       name: 'memory_rollback',
       description: 'Roll back a retired or replaced PROFILE.md entry by entryId using append-only retired.jsonl audit history, then invalidate prompt snapshots.',
       parameters: {

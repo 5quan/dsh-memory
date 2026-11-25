@@ -197,11 +197,12 @@ PRAGMA user_version = 2;
 #### 监听与精细过滤
 插件订阅 DSH `session/event` 流（并在初始化时可选配合 `ctx.sessionQuery` 按 `last_seq` 补齐停机期间遗漏事件）：
 - **精确识别追加事件**：通过 `@deepseek-ai/dsh-session` 导出的 `isAppendSurfaceEvent(event)` 过滤，只处理向对话尾部追加的原始表面事件，天然忽略 Compaction 替换副本（`surfaceOp.op === 'replace'`）和日志内部事件。
-- **子会话策略（`ingest.subagentPolicy`，默认 `'user-only'`）**：
+- **子会话策略（`ingest.subagentPolicy`，默认 `'user-only'`；`ingest.injectSubagentContext`，默认 `false`）**：
   - 依据 DSH `SessionHeader` 规范，使用 `session.header.origin === 'subagent'` 识别子代理会话（不以 `parentSession != null` 一刀切，避免误伤普通 fork 会话）。
-  - `'user-only'`（默认）：子会话中**用户本人直接发出的消息照常采集**（防止直接进入员工线程纠偏时丢失记忆），仅过滤子代理自身的助手回复与工具输出；
+  - `'user-only'`（默认）：子会话中**用户本人直接发出的消息照常采集**（防止直接进入子会话纠偏时丢失记忆），仅过滤子代理自身的助手回复与工具输出；
   - `'ignore'`：完全忽略子代理会话；
   - `'all'`：全量采集。
+  - 默认 `ingest.injectSubagentContext: false`（`.volatile()` 实时开关）仅隔离面向子会话的冻结前缀生成（避免 `snapshots/` 遗留一次性子会话快照）与 `dsh-memory/delta` 推送，**不影响上述 `user-only` 原文与纠偏采集**。
   - 支持配置 `ingest.excludeSessionIds` 与 `scope`（个人秘书默认统一为 `'default'`）。
 - **事件内容过滤（只收语义对话流）**：
   - 仅提取 `user/message`（排除 `<system-reminder>`、插件自身注入的上下文消息、handoff 内部包裹）、`assistant/message`（最终纯文本回复）以及 `ask_user` / `show_view` 交互回答；
@@ -348,6 +349,7 @@ stateDiagram-v2
 #### 1. 静态冻结前缀（按 `(session_id, logical_date)` 冻结）
 通过 `ctx.systemPrompt.section({ name: 'dsh-memory', order: 645, interpolate: false, text })` 注入。
 - **按 `(session_id, logical_date)` 键控**：快照路径为 `snapshots/<safeSessionId>__<logicalDate>.md`。
+- **子会话默认隔离**：当 `session.header.origin === 'subagent'` 且 `ingest.injectSubagentContext` 为默认 `false` 时，直接返回空串且不写入 `snapshots/`（避免一次性子会话遗留孤儿快照文件）；开启开关后可恢复注入。
 - **生命周期**：同一逻辑日内保持字节级冻结，吃满 Provider Prompt Prefix Cache；当长会话跨越到新逻辑日（或当日首次补结出昨日日报、或用户调用 `memory_forget` 使快照失效）时，下一轮自动生成新日期快照并清理旧快照，避免“三天前的昨日记忆一直挂在前缀里”。
 
 冻结区头部显式声明**当前绝对日期与安全边界**：
@@ -364,7 +366,7 @@ stateDiagram-v2
 
 #### 2. 持久化动态增量区（`agent/pre-step` + Compaction 游标重置）
 明确采用**持久化写入会话日志**的增量注入策略（而非每步临时拼接重复消耗 token）：
-1. 监听 `ctx.on('agent/pre-step', async (payload, next) => ...)`，先执行 `const decision = await next()`，若 `decision.kind !== 'enter'` 或当前会话 `memoryMode === 'off'` 则直接返回；
+1. 监听 `ctx.on('agent/pre-step', async (payload, next) => ...)`，先执行 `const decision = await next()`，若 `decision.kind !== 'enter'`、当前会话 `memoryMode === 'off'` 或属于 `origin === 'subagent'` 且 `ingest.injectSubagentContext` 未开启（默认 `false`）则直接返回；
 2. **Compaction 自动重置检测**：比对 `payload.agent.session.surface.replaceGeneration` 与 `session_state.replace_generation`。一旦发现 `replaceGeneration` 增大（说明会话发生过压缩/表面替换），立即在事务中更新 `replace_generation`、将 `buffer_cursor` 重置为 `null`（并清空 `injected_entities`），防止当日缓冲区新记忆和命中实体被压缩折叠丢失；
 3. 读取 `buffer/YYYY-MM-DD.jsonl` 中游标之后的新增 `pending` / `approved` 条目（及 M2/M3 中由本轮最新用户消息触发且尚未在本会话注入过的 `entities/` 卡片）；
 4. 若有增量内容，使用 `@deepseek-ai/dsh-llm` 的 `createUserMessage` 构造带 `source: { kind: 'dsh-memory/delta' }` 的上下文消息，以 `{ ...decision, messages: [...front, ...decision.messages] }` 返回（由 `dsh-agent-loop` 持久化写入本次会话历史，后续轮次自动吃缓存不再重复注入），并推进 `buffer_cursor`。
@@ -536,6 +538,7 @@ export function apply(ctx, config = {}) {
 | `idleMinutes` | `number` | `30` | 触发昨日日结所需的连续空闲分钟数 |
 | `defaultMode` | `'full' \| 'read-only' \| 'off'` | `'full'` | 新会话默认记忆/无痕模式 |
 | `ingest.subagentPolicy` | `'user-only' \| 'ignore' \| 'all'` | `'user-only'` | 子代理会话采集策略（默认保留用户直接发言，过滤子代理回复与工具） |
+| `ingest.injectSubagentContext` | `boolean` | `false` | 是否向 `origin === 'subagent'` 子代理会话注入冻结前缀与 `dsh-memory/delta`（`.volatile()` 实时开关；不影响 `subagentPolicy` 采集） |
 | `ingest.includeScopes` | `string[]` | `['default']` | 允许纳入采集与检索的 `scope` 白名单 |
 | `ingest.excludeSessionIds` | `string[]` | `[]` | 显式排除监听的会话 ID 列表 |
 | `digest.maxChunkTokens` | `number` | `24000` | 日报抽取单块 token 上限，超出时自动日内分块 Map-Reduce |
@@ -574,7 +577,7 @@ export function apply(ctx, config = {}) {
 
 | 阶段 | 工具名 | 职责 | 关键参数 |
 |---|---|---|---|
-| **M1** | `memory_search` | 在 `archive.sqlite`（FTS5 `trigram` + 短词 `LIKE`，多词支持 `AND` 优先与 `OR` 降级排序）与 `journals/*.md` 中检索原文与历史记录，省略 `query` 时按日期浏览近期归档，返回带 `chat://YYYY-MM-DD#<session>#<seq>` 锚点的片段（M4 支持按 `contextTurns` 附带邻接轮次） | `query?`, `dateFrom?`, `dateTo?`, `scope?`, `limit?`, `contextTurns? (M4)` |
+| **M1** | `memory_search` | 在 `archive.sqlite`（FTS5 `trigram` + 短词 `LIKE`，多词支持 `AND` 优先与 `OR` 降级排序）、`journals/*.md` 以及 `entities/*.md` / `lessons/*.md` 正文（`### Card Matches`）中检索原文与卡片细节，省略 `query` 时按日期浏览近期归档，返回带 `chat://YYYY-MM-DD#<session>#<seq>` 锚点与卡片引用的片段（M4 支持按 `contextTurns` 附带邻接轮次） | `query?`, `dateFrom?`, `dateTo?`, `scope?`, `limit?`, `contextTurns? (M4)` |
 | **M1** | `memory_journal_read` | 按日期读取某天完整日报，或列出已有日报日期列表 | `date?`（缺省则返回可用日期列表） |
 | **M1** | `memory_buffer_add` | 将记忆要点追加到当日缓冲区；插件自动从当前会话绑定真实用户 `anchor`，绝不直接改 `PROFILE.md` | `content`, `sourceType`, `target?`, `section?`, `pinned?` |
 | **M1** | `memory_buffer_manage` | 查看、筛选、通过（`approve`）或剔除（`reject`）当前缓冲区内的待处理记忆条目，支持可选 `settleNow: true` 立即结算 | `action` (`list` \| `approve` \| `reject`), `ids?`, `settleNow?` |
@@ -589,6 +592,8 @@ export function apply(ctx, config = {}) {
 | **M4** | `memory_dream_now` | 手动触发一次规则 + LLM 双通道后台整理提案（生成合并/冲突/`expires` 到期建议进缓冲区，失败不推进水位） | `dryRun?` |
 | **M4** | `memory_rollback` | 基于 `retired.jsonl` 追加留痕回滚某次 `PROFILE.md` 变更并立即失效快照 | `entryId` |
 | **M5** | `memory_lesson_manage` | 列出、读取、增改或删除 `lessons/` 避坑经验卡及其 `tags` / `triggers` 触发词 | `action` (`list` \| `read` \| `upsert` \| `delete`), `name?`, `tags?`, `triggers?`, `content?`, `op?`, `supersedesId?`, `pinned?`, `expires?`, `force?` |
+
+> **子代理会话（`session.header.origin === 'subagent'`）工具只读安全边界**：执行层对子代理会话仅放行只读检索查询（`memory_search`、`memory_read_context`、`memory_journal_read` 以及 `memory_history_browse` / `memory_entity_manage` / `memory_lesson_manage` 的 `list`/`read` 操作），其余写、删及全局运维工具/操作（`memory_forget`、`memory_buffer_add`、`memory_buffer_manage`、`memory_mode_set`、`memory_digest_now`、`memory_onboarding`、`memory_briefing`、`memory_dream_now`、`memory_rollback`、`rebuild`/`upsert`/`delete`）一律返回明确拒绝说明。
 
 ---
 

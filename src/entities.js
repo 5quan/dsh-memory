@@ -1,7 +1,14 @@
 import { readdirSync, readFileSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { formatProfileMeta, parseMetaParts } from './profile.js'
-import { atomicWriteFile, mergeUniqueTerms, slugifyName, triggerMatchIndex } from './util.js'
+import {
+  atomicWriteFile,
+  extractExtraCardLines,
+  mergeUniqueTerms,
+  searchCardRecords,
+  slugifyName,
+  triggerMatchIndex,
+} from './util.js'
 
 export const ENTITIES_DIR = 'entities'
 const META_RE = /\s*`\[([^\]]+)\]`\s*$/
@@ -296,4 +303,35 @@ export async function redactEntitiesForForget(home, { anchors = [], keyword, tod
   }
 
   return { updatedEntities }
+}
+
+export function searchEntities(home, { query = '', limit = 10 } = {}) {
+  return searchCardRecords(listEntities(home), {
+    query,
+    limit,
+    buildHeaderLower: entity => [entity.name, entity.slug, entity.type, ...entity.aliases].filter(Boolean).join(' ').toLowerCase(),
+    buildBodyItems: entity => [
+      ...entity.facts.map(fact => ({
+        content: fact.content,
+        entryId: fact.id || null,
+        source: fact.source || '',
+        added: fact.added || '',
+      })),
+      ...extractExtraCardLines(entity.raw, '事实记录', /^[-*]\s*(?:type|aliases):/i).map(line => ({
+        content: line,
+      })),
+    ],
+    formatFallbackSummary: (entity) => {
+      const aliasPart = entity.aliases.length > 0 ? `; aliases: ${entity.aliases.join(', ')}` : ''
+      const preview = entity.facts[0]?.content ? ` — ${entity.facts[0].content}` : ''
+      return `(${entity.type}${aliasPart})${preview}`
+    },
+    toHit: (entity, score) => ({
+      kind: 'entity',
+      slug: entity.slug,
+      name: entity.name,
+      type: entity.type,
+      ...score,
+    }),
+  })
 }
