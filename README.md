@@ -226,4 +226,6 @@
 
 ## 延伸文档
 
+- [上下文全生命周期与检索回忆策略复盘](docs/CONTEXT_LIFECYCLE.md)
+- [架构速览、SQLite 与文件系统关系及待办清单](docs/OVERVIEW.md)
 - [架构设计说明书](docs/DESIGN.md)
