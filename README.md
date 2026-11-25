@@ -62,6 +62,7 @@
      - 本轮话语命中的 `lessons/*.md`（`<= 1500` tokens，`injected_lessons` 会话去重）；
      - 每日首次正常交互的晨报摘要 / 空画像冷启动引导。
    - **Compaction 防失忆**：监听 `session.surface.replaceGeneration`，一旦发生压缩递增，自动重置 `buffer_cursor`、`injected_entities` 与 `injected_lessons`，下轮即重新注入必要记忆。
+   - **子会话上下文隔离**：当 `session.header.origin === 'subagent'` 且 `ingest.injectSubagentContext` 为默认 `false` 时，跳过冻结前缀（不写 `snapshots/`）与 `dsh-memory/delta` 动态增量，同时仍保持 `ingest.subagentPolicy: 'user-only'` 对子会话中真实人类消息与纠偏的采集。
 
 ---
 
@@ -87,9 +88,9 @@
 ### 3.2 Search 检索流程（渐进下钻 + 双阶段检索 + 行窗口邻接）
 
 1. **L0 → L1 → L2 跨月时间下钻（[`src/history.js`](src/history.js)）**：先看冻结前缀中的全局 L0 `history/.abstract.md`，再用 `memory_history_browse` 查某月 L1 `.overview.md`，再用 `memory_journal_read` 读具体日期 L2 日报。
-2. **`memory_search` 双阶段全文检索（[`src/store.js`](src/store.js)）**：
-   - 同时查询 `archive.sqlite` 原文与 `journals/*.md`；
-   - **阶段 1（严格 `AND`）**：长度 `>= 3` 的词走 SQLite FTS5 `trigram` + `bm25`，1–2 字短词走 `LIKE` 精确匹配；
+2. **`memory_search` 双阶段全文检索（[`src/store.js`](src/store.js)、[`src/entities.js`](src/entities.js)、[`src/lessons.js`](src/lessons.js)）**：
+   - 有 `query` 时同步检索 `archive.sqlite` 原文、`journals/*.md` 日报以及 `entities/*.md` 与 `lessons/*.md` 卡片正文（卡片命中按 `### Card Matches` 分组返回）；
+   - **阶段 1（严格 `AND`）**：长度 `>= 3` 的词走 SQLite FTS5 `trigram` + `bm25`，1–2 字短词走 `LIKE` 精确匹配；日报与卡片正文同步执行全词 `AND` 过滤；
    - **阶段 2（多词 `OR` 降级）**：多词严格 `AND` 无命中时自动降级为 `OR`，按“命中词数 > 命中字符数 > 时间倒序”重排；
    - 省略 `query` 时支持按 `dateFrom` / `dateTo` 浏览最近原文；可选传 `contextTurns`（`0..3`）直接附带前后轮。
 3. **`memory_read_context` 行窗口邻接扩展（[`src/tools.js`](src/tools.js)）**：
@@ -135,7 +136,7 @@
 
 | 阶段 | 工具名 | 核心职责 | 关键参数 |
 |---|---|---|---|
-| **M1** | `memory_search` | 双阶段检索原文库（FTS5 + `LIKE` + 多词 `OR`）与日报；无 `query` 时按日期浏览 | `query?`, `dateFrom?`, `dateTo?`, `scope?`, `limit?`, `contextTurns?` |
+| **M1** | `memory_search` | 双阶段检索原文库（FTS5 + `LIKE` + 多词 `OR`）、日报及 `entities/` / `lessons/` 卡片正文；无 `query` 时按日期浏览 | `query?`, `dateFrom?`, `dateTo?`, `scope?`, `limit?`, `contextTurns?` |
 | **M1** | `memory_journal_read` | 按日期读取完整日报，或列出所有已有日报日期 | `date?` |
 | **M1** | `memory_buffer_add` | 向当日缓冲区写入记忆/纠偏/实体事实/避坑经验（自动绑定锚点 + 凭据与去重守卫） | `content`, `sourceType`, `target?`, `section?`, `tags?`, `triggers?`, `op?`, `supersedesId?`, `expires?`, `pinned?` |
 | **M1** | `memory_buffer_manage` | 查看、批量 `approve` / `reject` 缓冲区条目，支持 `settleNow: true` | `action`, `ids?`, `date?`, `reason?`, `settleNow?` |
@@ -151,19 +152,22 @@
 | **M4** | `memory_rollback` | 基于 `retired.jsonl` 追加恢复被替换/淘汰的 `PROFILE.md` 条目 | `entryId` |
 | **M5** | `memory_lesson_manage` | 列出、读取、增改或删除 `lessons/` 避坑经验卡及 `tags`/`triggers` | `action`, `name?`, `tags?`, `triggers?`, `content?`, `op?`, `supersedesId?`, `pinned?`, `expires?`, `force?` |
 
+> **`subagent` 只读安全边界**：当调用会话的 `session.header.origin === 'subagent'` 时，仅放行只读检索操作（`memory_search`、`memory_read_context`、`memory_journal_read` 及 `memory_history_browse` / `memory_entity_manage` / `memory_lesson_manage` 的 `list`/`read`），拒绝一切写/删/全局运维调用（`memory_forget`、`memory_buffer_add`、`memory_buffer_manage`、`memory_mode_set`、`memory_digest_now`、`memory_onboarding`、`memory_briefing`、`memory_dream_now`、`memory_rollback` 及 `rebuild`/`upsert`/`delete`）。
+
 ---
 
 ## 5. 插件内部实时设置开关与配置（DSH 原生设置页）
 
 `dsh-memory` 在入口导出符合 `@deepseek-ai/schemastery` 的 **`Config`**（见 [`src/config.js`](src/config.js)），关键开关均标记 `.volatile()`：
 - 在 DSH 设置界面中会自动生成 `dsh-memory` 表单页，修改后直接写入当前激活 Profile 的 `cordis.patch.yml`，**无需重启即可热生效**；
-- 修改 `dream.*`、`briefing.enabled`、`onboarding.enabled`、`correction.autoCapture`、`sections.entities.*`、`sections.lessons.*`、`llm.*` **不会**失效今日 `snapshots/` 冻结前缀，零额外 KV Cache 击穿开销。
+- 修改 `ingest.injectSubagentContext`、`dream.*`、`briefing.enabled`、`onboarding.enabled`、`correction.autoCapture`、`sections.entities.*`、`sections.lessons.*`、`llm.*` **不会**失效今日主会话 `snapshots/` 冻结前缀，零额外 KV Cache 击穿开销。
 
 | 配置路径 | 默认值 | 实时热生效 | 说明 |
 |---|---|---|---|
 | `defaultMode` | `'full'` | `.volatile()` | 新会话默认记忆/无痕模式（`full` / `read-only` / `off`） |
 | `dayStartHour` | `2` | `.volatile()` | 逻辑日边界小时（0–23） |
 | `idleMinutes` | `30` | `.volatile()` | 自动日结所需连续空闲分钟数 |
+| `ingest.injectSubagentContext` | `false` | `.volatile()` | 是否向 `origin === 'subagent'` 子会话注入冻结前缀与 `dsh-memory/delta`（默认关闭，不影响 `user-only` 采集） |
 | `onboarding.enabled` | `true` | `.volatile()` | 空画像冷启动引导开关 |
 | `briefing.enabled` | `true` | `.volatile()` | 每日首次正常交互晨报开关 |
 | `correction.autoCapture` | `true` | `.volatile()` | 轻量规则自动捕获用户纠偏开关 |
@@ -186,7 +190,7 @@
 | `llm.provider` / `llm.model` | `''` | `.volatile()` | 后台日结与 Dream 专用模型覆盖（留空继承默认模型） |
 | `home` | `$DSH_HOME/daily-memory` | 重载生效 | 记忆根目录 |
 | `timeZone` | 系统时区 | 重载生效 | 逻辑日与日报日期格式化时区 |
-| `ingest.*` / `digest.maxChunkTokens` | `user-only` / `24000` | 重载生效 | 子会话采集策略、Scope 白名单与分块上限 |
+| `ingest.subagentPolicy` / `includeScopes` / `excludeSessionIds` / `digest.maxChunkTokens` | `user-only` / `24000` | 重载生效 | 子会话采集策略、Scope 白名单与分块上限 |
 
 ---
 

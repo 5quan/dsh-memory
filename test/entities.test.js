@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -193,4 +193,72 @@ test('agent/pre-step injects matched entity cards once per session without break
   const entAfterForget = entityApi.readEntity(dir, '老王')
   assert.equal(entAfterForget.raw.includes('机房 A'), false)
   assert.equal(entAfterForget.raw.includes('[已按用户要求遗忘 · 2026-11-23]'), true)
+})
+
+test('searchEntities searches entity body facts and extra lines with AND priority and OR coverage fallback', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-memory-ent-search-'))
+  t.after(() => {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5 })
+  })
+
+  assert.deepEqual(entityApi.searchEntities(dir, { query: '15432' }), [])
+  assert.deepEqual(entityApi.searchEntities(dir, { query: '' }), [])
+
+  await entityApi.upsertEntity(dir, {
+    name: 'ProdDB',
+    type: 'server',
+    aliases: ['主库'],
+    content: 'PostgreSQL 运行在端口 15432，数据目录 D:/pgdata',
+    added: '2026-11-24',
+    source: 'chat://2026-11-24#main#1',
+  })
+  await entityApi.upsertEntity(dir, {
+    name: 'ProdDB',
+    content: '每日凌晨 03:00 自动执行 pg_dump 备份',
+    added: '2026-11-24',
+    source: 'manual',
+  })
+  await entityApi.upsertEntity(dir, {
+    name: 'StagingBox',
+    type: 'server',
+    aliases: ['测试机'],
+    content: '测试环境 PostgreSQL 端口 5432',
+    added: '2026-11-24',
+    source: 'manual',
+  })
+
+  // Hand-written extra note section in markdown file is also searchable
+  const prodPath = entityApi.entityPath(dir, 'proddb')
+  writeFileSync(prodPath, `${readFileSync(prodPath, 'utf8')}\n## 备注\n手工补充：值班邮箱 ops@example.com\n`, 'utf8')
+
+  // Body-only keyword (not in entity name or aliases)
+  const portHits = entityApi.searchEntities(dir, { query: '15432' })
+  assert.equal(portHits.length, 1)
+  assert.equal(portHits[0].name, 'ProdDB')
+  assert.equal(portHits[0].entryId, 'ent_01')
+  assert.equal(portHits[0].snippet.includes('15432'), true)
+
+  // Extra hand-written markdown line match
+  const noteHits = entityApi.searchEntities(dir, { query: 'ops@example.com' })
+  assert.equal(noteHits.length, 1)
+  assert.equal(noteHits[0].name, 'ProdDB')
+  assert.equal(noteHits[0].snippet.includes('ops@example.com'), true)
+
+  // Cross header + body strict AND match excludes partial match on StagingBox
+  const crossHits = entityApi.searchEntities(dir, { query: '主库 15432' })
+  assert.equal(crossHits.length, 1)
+  assert.equal(crossHits[0].name, 'ProdDB')
+  assert.equal(crossHits[0].isAndMatch, true)
+
+  // Multi-term OR coverage fallback: 2 matched terms ranks above 1 matched term
+  const orHits = entityApi.searchEntities(dir, { query: 'PostgreSQL 15432 不存在词' })
+  assert.equal(orHits.length, 2)
+  assert.equal(orHits[0].name, 'ProdDB')
+  assert.equal(orHits[1].name, 'StagingBox')
+
+  // Header-only query falls back to summary hit & case-insensitivity works
+  const headerOnly = entityApi.searchEntities(dir, { query: '测试机' })
+  assert.equal(headerOnly.length, 1)
+  assert.equal(headerOnly[0].name, 'StagingBox')
+  assert.equal(entityApi.searchEntities(dir, { query: 'POSTGRESQL 15432' })[0].name, 'ProdDB')
 })

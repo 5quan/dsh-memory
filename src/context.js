@@ -271,8 +271,14 @@ export function createContextApi({
     ].join('\n')
   }
 
-  function sectionFor(sessionId) {
+  function isSubagentContext(options) {
+    return options?.isSubagent === true
+      || options?.agent?.session?.header?.origin === 'subagent'
+  }
+
+  function sectionFor(sessionId, options = {}) {
     if (!sessionId) return ''
+    if (isSubagentContext(options) && config.ingest?.injectSubagentContext !== true) return ''
     if (effectiveMode(sessionId) === 'off') return ''
 
     const sig = frozenSectionSignature()
@@ -339,6 +345,11 @@ export function createContextApi({
   }
 
   function buildDeltaForSession(sessionId, scope, currentGen, latestUserText = '', options = {}) {
+    const isSubagent = isSubagentContext(options)
+    if (isSubagent && config.ingest?.injectSubagentContext !== true) {
+      return undefined
+    }
+
     let state = store.getSessionState(sessionId)
     const prevGen = state?.replaceGeneration ?? 0
 
@@ -380,7 +391,7 @@ export function createContextApi({
     let briefingNotice = ''
     let onboardingNotice = ''
     const allowInteractiveNotices = mode === 'full'
-      && options.isSubagent !== true
+      && !isSubagent
       && options.isInteractiveTurn !== false
     if (allowInteractiveNotices) {
       const uiMode = options.uiMode ?? detectSessionUiMode(ctx, options.agent)
@@ -479,7 +490,10 @@ export function createContextApi({
       name: 'dsh-memory',
       order: PROMPT_SECTION_ORDER,
       interpolate: false,
-      text: context => sectionFor(context?.agent?.id),
+      text: context => sectionFor(context?.agent?.id, {
+        agent: context?.agent,
+        isSubagent: context?.agent?.session?.header?.origin === 'subagent',
+      }),
     }), 'dsh-memory: frozen system prompt section')
 
     ctx.effect(() => ctx.on('agent/pre-step', async ({ agent, step }, next) => {
@@ -489,13 +503,15 @@ export function createContextApi({
       const sessionId = agent?.id
       if (!sessionId || effectiveMode(sessionId) === 'off') return decision
 
+      const isSubagent = agent?.session?.header?.origin === 'subagent'
+      if (isSubagent && config.ingest?.injectSubagentContext !== true) return decision
+
       const state = store.getSessionState(sessionId)
       const scope = state?.scope ?? 'default'
       if (!config.ingest.includeScopes.includes(scope)) return decision
 
       const currentGen = Number(agent?.session?.surface?.replaceGeneration ?? 0)
       const latestUserText = latestUserPromptText(decision.messages)
-      const isSubagent = agent?.session?.header?.origin === 'subagent'
       const isInteractiveTurn = (step === undefined || step === 1) && hasInteractiveUserMessage(decision.messages)
       const deltaMsg = buildDeltaForSession(sessionId, scope, currentGen, latestUserText, {
         agent,

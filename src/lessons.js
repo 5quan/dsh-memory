@@ -2,7 +2,14 @@ import { readdirSync, readFileSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { computeContentHash, detectSecret } from './guard.js'
 import { formatProfileMeta, parseMetaParts } from './profile.js'
-import { atomicWriteFile, mergeUniqueTerms, slugifyName, triggerMatchIndex } from './util.js'
+import {
+  atomicWriteFile,
+  extractExtraCardLines,
+  mergeUniqueTerms,
+  searchCardRecords,
+  slugifyName,
+  triggerMatchIndex,
+} from './util.js'
 
 export const LESSONS_DIR = 'lessons'
 const META_RE = /\s*`\[([^\]]+)\]`\s*$/
@@ -380,4 +387,38 @@ export async function redactLessonsForForget(home, { anchors = [], keyword, forc
   }
 
   return { updatedLessons, skippedPinnedIds }
+}
+
+export function searchLessons(home, { query = '', limit = 10 } = {}) {
+  return searchCardRecords(listLessons(home), {
+    query,
+    limit,
+    buildHeaderLower: lesson => [lesson.name, lesson.slug, ...lesson.tags, ...lesson.triggers].filter(Boolean).join(' ').toLowerCase(),
+    buildBodyItems: lesson => [
+      ...lesson.entries.map(entry => ({
+        content: entry.content,
+        entryId: entry.id || null,
+        source: entry.source || '',
+        added: entry.added || '',
+      })),
+      ...extractExtraCardLines(lesson.raw, '避坑条目', /^[-*]\s*(?:tags|triggers):/i).map(line => ({
+        content: line,
+      })),
+    ],
+    formatFallbackSummary: (lesson) => {
+      const metaParts = []
+      if (lesson.tags.length > 0) metaParts.push(`tags: ${lesson.tags.join(', ')}`)
+      if (lesson.triggers.length > 0) metaParts.push(`triggers: ${lesson.triggers.join(', ')}`)
+      const metaText = metaParts.length > 0 ? `(${metaParts.join('; ')})` : '(lesson)'
+      const preview = lesson.entries[0]?.content ? ` — ${lesson.entries[0].content}` : ''
+      return `${metaText}${preview}`
+    },
+    toHit: (lesson, score) => ({
+      kind: 'lesson',
+      slug: lesson.slug,
+      name: lesson.name,
+      tags: [...lesson.tags],
+      ...score,
+    }),
+  })
 }

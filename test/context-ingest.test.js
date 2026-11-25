@@ -3,11 +3,15 @@ import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { createBriefingApi } from '../src/briefing.js'
 import { createBufferApi } from '../src/buffer.js'
 import { normalizeConfig } from '../src/config.js'
 import { createContextApi } from '../src/context.js'
+import * as entityApi from '../src/entities.js'
 import { createIngestApi } from '../src/ingest.js'
 import * as journalApi from '../src/journal.js'
+import * as lessonApi from '../src/lessons.js'
+import { createOnboardingApi } from '../src/onboarding.js'
 import * as profileApi from '../src/profile.js'
 import { createMemoryStore } from '../src/store.js'
 
@@ -249,4 +253,174 @@ test('ingest keeps user messages in subagent threads, ignores replacement events
   assert.equal(coldPrompt.includes('核心画像与历史日报尚为空'), true)
   emptyStore.setSessionMode('cold-off', 'off')
   assert.equal(emptyContextApi.sectionFor('cold-off'), '')
+})
+
+test('subagent sessions skip frozen snapshot and delta injection by default while keeping user-only ingest and auto-correction, and restore injection when enabled', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-memory-subagent-ctx-'))
+  const nowMs = Date.parse('2026-11-23T10:00:00+08:00')
+  const clock = { now: () => nowMs }
+  const config = normalizeConfig({ home: dir, timeZone: 'Asia/Shanghai' })
+  const store = createMemoryStore(join(dir, 'archive.sqlite'))
+  t.after(() => {
+    store.close()
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5 })
+  })
+
+  await journalApi.writeJournalAtomic(dir, '2026-11-22', '# 2026-11-22 日报\n## 发生了什么\n- 昨日完成基线测试。\n')
+  await entityApi.upsertEntity(dir, {
+    name: 'ProdDB',
+    type: 'server',
+    aliases: ['pg-main'],
+    content: '端口 15432',
+    added: '2026-11-22',
+    source: 'manual',
+  })
+  await lessonApi.upsertLesson(dir, {
+    name: '部署检查',
+    tags: ['deploy'],
+    triggers: ['nginx'],
+    content: '先跑 nginx -t 再 reload',
+    added: '2026-11-22',
+    source: 'manual',
+  })
+
+  const ctx = mockHookCtx()
+  const bufferApi = createBufferApi({ home: dir, profileApi, lessonApi, clock })
+  await bufferApi.appendCreate({
+    logicalDate: '2026-11-23',
+    sourceType: 'extracted',
+    target: 'profile',
+    content: '主会话待确认规则',
+  })
+
+  let contextApi
+  const snapshotFacade = {
+    hasSnapshot: (sid, date) => contextApi?.hasSnapshot?.(sid, date) ?? false,
+    invalidateSnapshots: opts => contextApi?.invalidateSnapshots?.(opts),
+  }
+  const briefingApi = createBriefingApi({
+    ctx,
+    config,
+    store,
+    journalApi,
+    bufferApi,
+    profileApi,
+    entityApi,
+    lessonApi,
+    contextApi: snapshotFacade,
+    clock,
+  })
+  const onboardingApi = createOnboardingApi({
+    ctx,
+    config,
+    store,
+    profileApi,
+    bufferApi,
+    entityApi,
+    contextApi: snapshotFacade,
+    clock,
+  })
+  contextApi = createContextApi({
+    ctx,
+    config,
+    store,
+    profileApi,
+    journalApi,
+    bufferApi,
+    entityApi,
+    lessonApi,
+    onboardingApi,
+    briefingApi,
+    clock,
+  })
+  const ingestApi = createIngestApi({ ctx, config, store, bufferApi, clock })
+  contextApi.install()
+  ingestApi.install()
+
+  assert.equal(config.ingest.injectSubagentContext, false)
+
+  const subSession = { id: 'sub-1', header: { id: 'sub-1', origin: 'subagent', parentSession: 'main-1' } }
+  const subAgent = {
+    id: 'sub-1',
+    session: {
+      header: { id: 'sub-1', origin: 'subagent', parentSession: 'main-1' },
+      surface: { replaceGeneration: 0 },
+    },
+  }
+  const promptSection = ctx.sections[0]
+  const preStep = ctx.preStepHandlers[0]
+
+  // Default: subagent skips frozen system prompt, leaves zero snapshots, and skips pre-step delta
+  assert.equal(contextApi.sectionFor('sub-1', { isSubagent: true }), '')
+  assert.equal(promptSection.text({ agent: subAgent }), '')
+  assert.deepEqual(existsSync(join(dir, 'snapshots')) ? readdirSync(join(dir, 'snapshots')) : [], [])
+
+  const subStepDefault = await preStep(
+    { agent: subAgent, step: 1 },
+    async () => ({
+      kind: 'enter',
+      messages: [{ role: 'user', content: [{ type: 'text', text: '用 pg-main 和 nginx 部署' }], source: { kind: 'user' } }],
+    }),
+  )
+  assert.equal(subStepDefault.messages.length, 1)
+  assert.equal(briefingApi.shouldDeliverToday(), true)
+  assert.equal(onboardingApi.shouldPromptForSession('main-1'), true)
+
+  // Normal non-subagent session still gets frozen prefix and writes snapshot
+  const mainSnap = promptSection.text({
+    agent: { id: 'main-1', session: { header: { id: 'main-1' } } },
+  })
+  assert.equal(mainSnap.includes('昨日完成基线测试'), true)
+  assert.deepEqual(readdirSync(join(dir, 'snapshots')), ['main-1__2026-11-23.md'])
+
+  // Subagent user-only ingest + auto-correction still captures human messages while dropping assistant replies
+  ingestApi.handleSessionEvent(subSession, {
+    type: 'user/message',
+    seq: 0,
+    time: nowMs,
+    surfaceOp: 'append',
+    data: { id: 'u-sub', role: 'user', content: [{ type: 'text', text: '不对，以后回复必须附带日志路径。' }], source: { kind: 'user' } },
+  })
+  ingestApi.handleSessionEvent(subSession, {
+    type: 'assistant/message',
+    seq: 1,
+    time: nowMs + 100,
+    surfaceOp: 'append',
+    data: { message: { id: 'a-sub', role: 'assistant', content: [{ type: 'text', text: '子会话内部输出噪声' }], source: { kind: 'model' } } },
+  })
+  await ingestApi.flush()
+
+  const archived = store.getMessagesForDate('2026-11-23')
+  assert.equal(archived.length, 1)
+  assert.equal(archived[0].role, 'user')
+  assert.equal(archived[0].is_subagent, 1)
+  assert.equal(archived[0].anchor, 'chat://2026-11-23#sub-1#0')
+
+  const corrItem = bufferApi.listItems({ logicalDate: '2026-11-23' }).find(i => i.source_type === 'correction')
+  assert.ok(corrItem)
+  assert.equal(corrItem.anchor, 'chat://2026-11-23#sub-1#0')
+  assert.equal(corrItem.content.includes('附带日志路径'), true)
+
+  // Enabling ingest.injectSubagentContext restores frozen prefix & delta (still suppressing briefing/onboarding)
+  config.ingest.injectSubagentContext = true
+  const subFrozenEnabled = promptSection.text({ agent: subAgent })
+  assert.equal(subFrozenEnabled.includes('昨日完成基线测试'), true)
+  assert.equal(existsSync(join(dir, 'snapshots', 'sub-1__2026-11-23.md')), true)
+
+  const subStepEnabled = await preStep(
+    { agent: subAgent, step: 1 },
+    async () => ({
+      kind: 'enter',
+      messages: [{ role: 'user', content: [{ type: 'text', text: '用 pg-main 和 nginx 部署' }], source: { kind: 'user' } }],
+    }),
+  )
+  assert.equal(subStepEnabled.messages.length, 2)
+  const deltaText = subStepEnabled.messages[0].content[0].text
+  assert.equal(deltaText.includes('主会话待确认规则'), true)
+  assert.equal(deltaText.includes('端口 15432'), true)
+  assert.equal(deltaText.includes('先跑 nginx -t 再 reload'), true)
+  assert.equal(deltaText.includes('每日晨报与待确认记忆'), false)
+  assert.equal(deltaText.includes('初始画像冷启动引导'), false)
+  assert.equal(briefingApi.shouldDeliverToday(), true)
+  assert.equal(onboardingApi.shouldPromptForSession('main-1'), true)
 })

@@ -118,6 +118,137 @@ export function mergeUniqueTerms(existing = [], incoming = []) {
   return merged
 }
 
+export function parseSearchTerms(query) {
+  const seen = new Set()
+  const terms = []
+  for (const raw of String(query ?? '').trim().toLowerCase().split(/\s+/)) {
+    if (!raw || seen.has(raw)) continue
+    seen.add(raw)
+    terms.push({ term: raw, len: [...raw].length })
+  }
+  return terms
+}
+
+export function scoreTextAgainstTerms(lowerText, termEntries) {
+  let matchedCount = 0
+  let matchedChars = 0
+  for (const entry of termEntries) {
+    if (lowerText.includes(entry.term)) {
+      matchedCount += 1
+      matchedChars += entry.len
+    }
+  }
+  return { matchedCount, matchedChars }
+}
+
+export function extractExtraCardLines(raw, structuredSectionTitle, headerMetaRe) {
+  const extras = []
+  let inStructuredSection = false
+  let seenH2 = false
+  for (const line of String(raw ?? '').split(/\r?\n/)) {
+    if (/^#\s+/.test(line)) continue
+    const h2 = /^##\s+(.+?)\s*$/.exec(line)
+    if (h2) {
+      seenH2 = true
+      inStructuredSection = h2[1].trim() === structuredSectionTitle
+      continue
+    }
+    if (/^#{3,6}\s+/.test(line)) continue
+    const trimmed = line.trim()
+    if (!trimmed) continue
+    if (!seenH2 && headerMetaRe.test(line)) continue
+    if (inStructuredSection && /^[-*]\s+/.test(line)) continue
+    extras.push(trimmed)
+  }
+  return extras
+}
+
+export function searchCardRecords(cards, {
+  query = '',
+  limit = 10,
+  buildHeaderLower,
+  buildBodyItems,
+  formatFallbackSummary,
+  toHit,
+} = {}) {
+  const termEntries = parseSearchTerms(query)
+  if (termEntries.length === 0) return []
+  const safeLimit = Math.min(Math.max(Number.parseInt(limit, 10) || 10, 1), 100)
+
+  const andHits = []
+  const orHits = []
+
+  for (const card of cards) {
+    const headerLower = buildHeaderLower(card)
+    const bodyItems = buildBodyItems(card)
+    let bodyMatchedAny = false
+
+    for (const item of bodyItems) {
+      const bodyLower = String(item.content ?? '').toLowerCase()
+      const bodyScore = scoreTextAgainstTerms(bodyLower, termEntries)
+      if (bodyScore.matchedCount === 0) continue
+
+      bodyMatchedAny = true
+      const combinedScore = scoreTextAgainstTerms(`${headerLower}\n${bodyLower}`, termEntries)
+      const isAndMatch = combinedScore.matchedCount === termEntries.length
+      const hit = toHit(card, {
+        entryId: item.entryId ?? null,
+        source: item.source ?? '',
+        added: item.added ?? '',
+        snippet: clipText(item.content, 300),
+        matchedCount: combinedScore.matchedCount,
+        matchedChars: combinedScore.matchedChars,
+        bodyMatchedCount: bodyScore.matchedCount,
+        isAndMatch,
+      })
+      if (isAndMatch) {
+        andHits.push(hit)
+      } else if (termEntries.length > 1) {
+        orHits.push(hit)
+      }
+    }
+
+    if (!bodyMatchedAny) {
+      const headerScore = scoreTextAgainstTerms(headerLower, termEntries)
+      if (headerScore.matchedCount > 0) {
+        const isAndMatch = headerScore.matchedCount === termEntries.length
+        const hit = toHit(card, {
+          entryId: null,
+          source: '',
+          added: '',
+          snippet: clipText(formatFallbackSummary(card), 300),
+          matchedCount: headerScore.matchedCount,
+          matchedChars: headerScore.matchedChars,
+          bodyMatchedCount: 0,
+          isAndMatch,
+        })
+        if (isAndMatch) {
+          andHits.push(hit)
+        } else if (termEntries.length > 1) {
+          orHits.push(hit)
+        }
+      }
+    }
+  }
+
+  if (andHits.length > 0 || termEntries.length <= 1) {
+    return andHits
+      .sort((a, b) =>
+        b.bodyMatchedCount - a.bodyMatchedCount
+        || b.matchedChars - a.matchedChars
+        || a.slug.localeCompare(b.slug))
+      .slice(0, safeLimit)
+  }
+
+  return orHits
+    .sort((a, b) =>
+      b.matchedCount - a.matchedCount
+      || b.matchedChars - a.matchedChars
+      || b.bodyMatchedCount - a.bodyMatchedCount
+      || a.slug.localeCompare(b.slug))
+    .slice(0, safeLimit)
+}
+
 export function estimateTokens(text) {
   const input = String(text ?? '')
   if (input === '') return 0

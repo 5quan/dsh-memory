@@ -9,20 +9,23 @@ import * as dshMemoryPlugin from '../index.js'
 import { Config, normalizeConfig, snapshotLiveConfig } from '../src/config.js'
 import * as profileApi from '../src/profile.js'
 
-test('Schemastery Config defines volatile live switches with safe defaults (dream.useLlm defaults false)', () => {
+test('Schemastery Config defines volatile live switches with safe defaults (dream.useLlm and ingest.injectSubagentContext default false)', () => {
   const parsed = Config({})
   assert.equal(isVolatile(parsed.defaultMode), true)
+  assert.equal(isVolatile(parsed.ingest.injectSubagentContext), true)
   assert.equal(isVolatile(parsed.dream.enabled), true)
   assert.equal(isVolatile(parsed.dream.useLlm), true)
   assert.equal(isVolatile(parsed.sections.profile.enabled), true)
   assert.equal(isVolatile(parsed.sections.lessons.enabled), true)
 
   assert.equal(parsed.defaultMode.get(), 'full')
+  assert.equal(parsed.ingest.injectSubagentContext.get(), false)
   assert.equal(parsed.dream.enabled.get(), true)
   assert.equal(parsed.dream.useLlm.get(), false)
 
   const normalized = normalizeConfig(parsed)
   assert.equal(normalized.defaultMode, 'full')
+  assert.equal(normalized.ingest.injectSubagentContext, false)
   assert.equal(normalized.dream.enabled, true)
   assert.equal(normalized.dream.useLlm, false)
   assert.equal(normalized.llm.provider, undefined)
@@ -173,4 +176,29 @@ test('live volatile updates hot-reload switches in real Cordis without breaking 
 
   updateVolatile(rawSchemaConfig.defaultMode, createVolatile('full'))
   assert.equal(rt.config.defaultMode, 'full')
+
+  // 5. Live volatile toggle of ingest.injectSubagentContext controls subagent injection without breaking main snapshot
+  const snapBeforeSubagentToggle = rt.contextApi.sectionFor('sess-live')
+  assert.equal(svc.getSettingsSnapshot().ingest.injectSubagentContext, false)
+  const subAgent = {
+    id: 'sub-live',
+    session: {
+      header: { id: 'sub-live', origin: 'subagent', parentSession: 'sess-live' },
+      surface: { replaceGeneration: 0 },
+    },
+  }
+  assert.equal(rt.contextApi.sectionFor('sub-live', { agent: subAgent }), '')
+  assert.equal(rt.contextApi.buildDeltaForSession('sub-live', 'default', 0, '准备运行 nginx', { agent: subAgent }), undefined)
+
+  updateVolatile(rawSchemaConfig.ingest.injectSubagentContext, createVolatile(true))
+  assert.equal(svc.getSettingsSnapshot().ingest.injectSubagentContext, true)
+  assert.equal(rt.contextApi.sectionFor('sub-live', { agent: subAgent }).includes('测试实时开关画像条目'), true)
+  assert.ok(rt.contextApi.buildDeltaForSession('sub-live', 'default', 0, '准备运行 nginx', { agent: subAgent }))
+  assert.equal(rt.contextApi.hasSnapshot('sess-live', '2026-11-23'), true)
+  assert.equal(rt.contextApi.sectionFor('sess-live'), snapBeforeSubagentToggle)
+
+  updateVolatile(rawSchemaConfig.ingest.injectSubagentContext, createVolatile(false))
+  assert.equal(svc.getSettingsSnapshot().ingest.injectSubagentContext, false)
+  assert.equal(rt.contextApi.sectionFor('sub-live', { agent: subAgent }), '')
+  assert.equal(rt.contextApi.buildDeltaForSession('sub-live', 'default', 0, '准备运行 nginx', { agent: subAgent }), undefined)
 })

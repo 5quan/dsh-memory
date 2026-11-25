@@ -474,3 +474,53 @@ test('buffer settlement, daily digest, Dream governance, memory_forget, and publ
   assert.equal(forgetForced.includes('Redacted 1 lesson card(s): nginx部署'), true)
   assert.equal(rt.lessonApi.readLesson(dir, 'Nginx部署').entries.some(e => e.content.includes('已按用户要求遗忘')), true)
 })
+
+test('searchLessons searches lesson body entries with AND priority and OR coverage fallback', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-memory-les-search-'))
+  t.after(() => {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5 })
+  })
+
+  assert.deepEqual(lessonApi.searchLessons(dir, { query: 'ECONNREFUSED' }), [])
+  assert.deepEqual(lessonApi.searchLessons(dir, { query: '' }), [])
+
+  await lessonApi.upsertLesson(dir, {
+    name: '反向代理排查',
+    tags: ['proxy', 'network'],
+    triggers: ['502', 'upstream'],
+    content: '出现 ECONNREFUSED 时先检查上游服务 18080 端口是否监听。',
+    added: '2026-11-24',
+    source: 'chat://2026-11-24#main#3',
+  })
+  await lessonApi.upsertLesson(dir, {
+    name: '本地构建说明',
+    tags: ['build'],
+    triggers: ['build'],
+    content: '上游服务端口冲突时先清理占用进程。',
+    added: '2026-11-24',
+    source: 'manual',
+  })
+
+  // Body-only error code match (not in card title/tags/triggers)
+  const bodyHits = lessonApi.searchLessons(dir, { query: 'ECONNREFUSED' })
+  assert.equal(bodyHits.length, 1)
+  assert.equal(bodyHits[0].name, '反向代理排查')
+  assert.equal(bodyHits[0].entryId, 'les_01')
+
+  // Cross header + body strict AND match
+  const crossHits = lessonApi.searchLessons(dir, { query: 'proxy 18080' })
+  assert.equal(crossHits.length, 1)
+  assert.equal(crossHits[0].name, '反向代理排查')
+  assert.equal(crossHits[0].isAndMatch, true)
+
+  // Multi-term OR coverage fallback: 2 matched terms ranks above 1 matched term
+  const orHits = lessonApi.searchLessons(dir, { query: '上游服务 ECONNREFUSED 不存在词' })
+  assert.equal(orHits.length, 2)
+  assert.equal(orHits[0].name, '反向代理排查')
+  assert.equal(orHits[1].name, '本地构建说明')
+
+  // Case-insensitive match
+  const caseHits = lessonApi.searchLessons(dir, { query: 'econnrefused' })
+  assert.equal(caseHits.length, 1)
+  assert.equal(caseHits[0].name, '反向代理排查')
+})
