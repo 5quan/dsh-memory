@@ -14,7 +14,7 @@
   - **在原版 DSH 中**：开箱独立运行（注册 15 个 `memory_*` 工具、自动切日、晨报与冷启动、DSH 原生设置面板实时开关）。
   - **搭配 `dsh-ctrl` / `ds-bot` 时**：保持单向解耦——`ds-bot` 侧配置 `memory: false`（同步静音自带 `MEMORY.md` 与 `learning.js`），通过 Cordis 服务 **`dshMemory`** 与标准事件 **`dsh-memory/day-rolled-over`** 单向消费 `dsh-memory`，实现轻量换段、统一晨报、Worker 实体/避坑经验拉取以及任务复盘回灌。
 
-### 已完成里程碑总览（M1–M5.5）
+### 已完成里程碑总览（M1–M5.5 & `#13`）
 
 | 阶段 | 状态 | 核心能力 |
 |---|---|---|
@@ -22,8 +22,9 @@
 | **M2** | ✅ 已完成 | OpenViking 风格 L0/L1/L2 历史索引（`history/`、`memory_history_browse`）与总览注入；`entities/` 实体档案卡、`target: entity:<名称>` 结算、别名精准触发动态注入与 `memory_entity_manage` |
 | **M3** | ✅ 已完成 | 初始画像冷启动引导（空画像首次加载触发，多端自适应 `show_view`/`ask_user`/`ask_user_question`/文本，Prefix Cache 保护）、每日晨报汇总与批量确认（`approve`/`reject` + `settleNow`）、轻量纠偏捕获（`source_type: 'correction'`），以及公开 Cordis 服务 `dshMemory` 与 `dsh-memory/day-rolled-over` 事件 |
 | **M4** | ✅ 已完成 | 规则 + LLM 双通道 Dream（`dream.lock`、失败不推水位、无证据不动、冲突标 `[CONFLICT]`、`expires` 到期淘汰、`rejectCooldownDays` 冷却期、`maxChangeRatio` 上限与 `retired.jsonl` 通用回滚）、`memory_read_context` 行窗口邻接扩展、`guard.js` 幂等去重与凭据“只记名不记值”拦截、`memory_forget` 补清 `PROFILE.md`/`retired.jsonl`，以及离线/在线消融评测脚本 |
-| **M5** | ✅ 已完成 | 避坑经验与程序性记忆（`lessons/*.md`、`target: 'lesson:<名称>'`、标签/触发词动态召回、`memory_lesson_manage`，`dshMemory` 新增 `matchLessons`/`getLesson`/`listLessons` 供 Worker 与原版 DSH 复用；可执行技能留在执行层） |
+| **M5** | ✅ 已完成 | 避坑经验与程序性记忆（`lessons/*.md`、`target: 'lesson:<名称>'`、标签/触发词动态召回、`memory_lesson_manage`，`dshMemory` 新增 `matchLessons`/`getLesson`/`listLessons` 供外层及原版 DSH 复用；可执行技能留在执行层） |
 | **M5.5** | ✅ 已完成 | DSH 原生 `.volatile()` 实时设置开关（`export const Config` 自动投影设置页）、`dream.useLlm` 分级默认关闭策略（`false`）、`dshMemory.getSettingsSnapshot()` 与本使用说明书 |
+| **`#13`** | ✅ 已完成 | `origin === 'subagent'` 默认隔离（`ingest.injectSubagentContext: false` 跳过冻结前缀快照与增量，保留 `user-only` 人类消息与纠偏采集）、15 个 `memory_*` 工具 `subagent` 只读执行边界，以及 `memory_search` 补齐 `entities/*.md` / `lessons/*.md` 正文检索（`### Card Matches`） |
 | **后续规划（Issue `#9`）** | 📝 已记录 | 全系统流程与提示词审查优化（修复 Dream 日报截断 + 借鉴 Anthropic Dreaming/Knowledge Wiki + 精简检索引导）、工作/聊天模式分化与防无关项目串台（差异化提示词 + `archived` 静默）、冻结前缀闲置指纹刷新、可选本地 SQLite 向量+RRF 混合检索、写入侧投毒拦截与红队验收 |
 
 ---
@@ -227,5 +228,4 @@
 ## 延伸文档
 
 - [上下文全生命周期与检索回忆策略复盘](docs/CONTEXT_LIFECYCLE.md)
-- [架构速览、SQLite 与文件系统关系及待办清单](docs/OVERVIEW.md)
 - [架构设计说明书](docs/DESIGN.md)

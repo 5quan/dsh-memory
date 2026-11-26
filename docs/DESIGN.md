@@ -1,6 +1,6 @@
 # `dsh-memory` 架构设计说明书
 
-> 状态：M1、M2（`#1`）、M3（`#2`：冷启动引导、每日晨报确认、轻量纠偏与公开 Cordis 服务契约）、M4（`#5`：Dream 后台巩固、`retired.jsonl` 通用回滚、行窗口邻接上下文、写入守卫与 `memory_forget` 8 层收尾）、M5（`#7`：`lessons/` 避坑经验与程序性记忆）已完成  
+> 状态：M1、M2（`#1`）、M3（`#2`：冷启动引导、每日晨报确认、轻量纠偏与公开 Cordis 服务契约）、M4（`#5`：Dream 后台巩固、`retired.jsonl` 通用回滚、行窗口邻接上下文、写入守卫与 `memory_forget` 8 层收尾）、M5（`#7`：`lessons/` 避坑经验与程序性记忆）、M5.5（`#10`：DSH 原生实时设置与说明书）、`#13`（`subagent` 默认上下文隔离、只读工具边界与卡片正文检索）已完成  
 > 仓库：`5quan/dsh-memory`  
 > 参考来源：DeepSeek Super-agent 设计探索（`https://zhuanlan.zhihu.com/p/2099987320443237060`）、`dsh-ctrl` 记忆体系前期探索、OpenViking L0/L1/L2 渐进披露范式、AutoDream 后台整理思想、Anthropic *The components of agent memory* / Dreaming & Knowledge Wiki 实践、MemMachine 邻接原文扩展思想
 

@@ -1,6 +1,6 @@
 # 上下文全生命周期与检索回忆策略复盘
 
-> 记录日期：2026-11-24  
+> 记录日期：2026-11-24（状态同步：2026-11-26）  
 > 适用范围：`dsh-memory` + `dsh-ctrl`（定制 `ds-bot`）联调全链路  
 > 定位：彻底厘清每一轮发给大模型的上下文长什么样、怎么随时间切换，以及遇到未知信息时“先查什么、怎么查最顺手、后续怎么改最合理”。
 
@@ -92,43 +92,42 @@ stateDiagram-v2
 
 ### （一）提示词与检索体验摩擦点
 
-1. **【指令冲突】两套原话检索工具在提示词里“左右互搏”**
+1. **【指令冲突 · 🚧 进行中 `dsh-ctrl#12` / `PR #14`】两套原话检索工具在提示词里“左右互搏”**
    - **现状**：Layer 2（`ds-bot/src/host/prompt.js` 第 23 行）教模型“找早期原话细节调 `read_own_chat`（`[part 2 #1234]` 锚点）”；紧接着 Layer 3（`dsh-memory/src/context.js` `USAGE_GUIDANCE`）又教模型“查历史原话调 `memory_search` + `memory_read_context`（`chat://` 锚点）”。
    - **优化方案**：双插件联调时明确主次——**跨天/跨段搜个人对话统一走 `memory_search` + `memory_read_context`**，`read_own_chat` 仅降级用于查看旧 Part 的 `[Handoff]` 交接笔记或群聊上下文，避免模型选工具纠结。
-2. **【引导平铺】`USAGE_GUIDANCE` 是“工具说明书”而非“决策路由表”**
+2. **【引导平铺 · ⏳ 待办 `dsh-memory#9`】`USAGE_GUIDANCE` 是“工具说明书”而非“决策路由表”**
    - **现状**：`dsh-memory/src/context.js` 把 15 个工具按功能罗列了一遍，但没告诉模型**先后顺序**和**短词搜索技巧**。
    - **优化方案**：将 `USAGE_GUIDANCE` 改写为 5 行紧凑的“按意图查表（先看前缀 ➔ 查人/坑先翻 Entity/Lesson ➔ 查日期走 History/Journal ➔ 查原话用短核心词 `memory_search` + `memory_read_context`）”。
-3. **【工具面过宽】15 个记忆工具全量常驻主会话 Layer 1**
+3. **【工具面过宽 · ⏳ 待办 `dsh-memory#9`】15 个记忆工具全量常驻主会话 Layer 1**
    - **现状**：像 `memory_dream_now`、`memory_digest_now`、`memory_rollback`、`memory_onboarding` 这类低频运维/一次性工具每轮都占着 Chief 的工具 Schema 预算和注意力。
    - **优化方案**：日常对话只向模型常驻暴露高频核心工具（检索 4 个 + 缓冲写入/确认 + 实体/避坑查看 + 遗忘），低频运维操作收口到设置面板或合并为单一管理入口。
-4. **【场景无区分】闲聊与工作共享同一套冻结日报与卡片触发**
+4. **【场景无区分 · ⏳ 待办 `dsh-memory#9`】闲聊与工作共享同一套冻结日报与卡片触发**
    - **现状**：冻结前缀永远挂着近 7 天开发日报，聊生活话题时容易把模型带偏去提旧项目。
    - **优化方案**：对应 `dsh-memory` Issue `#9` 第 2 项，引入 `work / chat` 模式与完结卡片 `status: archived` 静默归档，让上下文不仅“记得住”，还懂得“不合时宜时闭嘴”。
 
 ### （二）代码级上下文与存储隐蔽盲区
 
-5. **【高危 · Worker 污染与烧钱】隔离 Worker 会被默认塞入 ~6.5k 个人记忆冻结前缀**
+5. **【高危 · ✅ 已落地 `dsh-memory#13`；工具面收口见 `dsh-ctrl#12` / `PR #14`】隔离 Worker 会被默认塞入 ~6.5k 个人记忆冻结前缀**
    - **根因**：`dsh-memory/src/context.js` 的 `sectionFor` 在装配 Layer 3 静态前缀时，仅检查了 `effectiveMode(sessionId) === 'off'`，**未过滤 `session.header.origin === 'subagent'` 或 `worker-*` 会话**（`isSubagent` 目前只在 `pre-step` 中拦了晨报/冷启动，没拦 System Prompt）。
-   - **后果**：`dsh-ctrl` 拉起一次性 `worker-<ticketId>` 时，每个后台 Worker 都会白白背上几千 Tokens 的个人画像与近 7 天闲聊日报，破坏“干净装配”并翻倍消耗费用。
-   - **解法**：`dsh-memory` 默认对 `subagent` 会话跳过静态前缀注入（或增加配置项 `ingest.injectSubagentPrefix: false`），同时 `worker-executor.js` 创建 Worker 会话时显式将其设为无痕/仅靠 `memoryBridge.matchEntities / matchLessons` 按需喂卡。
-6. **【检索死角】`memory_search` 漏搜了 `entities/*.md` 与 `lessons/*.md` 正文**
-   - **根因**：`dsh-memory/src/tools.js` 的 `memory_search` 目前只检索 `archive.sqlite`（对话原文）与 `journals/*.md`（日报），**完全没有扫描实体卡与避坑卡的正文**。
-   - **后果**：若用户按卡片内部细节反查（如问“哪台机器用了 `15432` 端口？”，未提及机器名因此不触发别名动态注入，且该条目系手写或早期原文已清理），`memory_search("15432")` 会直接报未命中。
-   - **解法**：卡片总量极小，在 `memory_search` 中顺带扫描 `entities/` 与 `lessons/` 正文并归入 `Card Matches` 分组返回（耗时 `< 2ms`），彻底消除检索死角。
-7. **【换段断片】日内重型换 Part 时，上一轮刚触发的实体/避坑卡语境会丢失**
+   - **已落地解法**：`dsh-memory#13` 已默认对 `origin === 'subagent'` 跳过冻结前缀（不写 `snapshots/`）与 `dsh-memory/delta`（新增 `.volatile()` 开关 `ingest.injectSubagentContext: false`），并增加 15 个工具的子会话只读安全边界；`dsh-ctrl#12`（`PR #14`）同步在编排侧收口 Worker/Reviewer 可见工具白名单。
+6. **【检索死角 · ✅ 已落地 `dsh-memory#13`】`memory_search` 漏搜了 `entities/*.md` 与 `lessons/*.md` 正文**
+   - **根因**：`dsh-memory/src/tools.js` 的 `memory_search` 原先只检索 `archive.sqlite`（对话原文）与 `journals/*.md`（日报），未扫描实体卡与避坑卡正文。
+   - **已落地解法**：`dsh-memory#13` 已补齐 `searchEntities` / `searchLessons` 正文扫描并归入 `### Card Matches` 分组返回（严格 `AND` 优先 + 多词 `OR` 降级）。
+7. **【换段断片 · 📋 已建 Issue [`dsh-ctrl#15`](https://github.com/5quan/dsh-ctrl/issues/15)】日内重型换 Part 时，上一轮刚触发的实体/避坑卡语境会丢失**
    - **根因**：`ds-bot/src/host/parts.js` 的 `historyEntry` 在向新 Part 搬运最近 16k 原话时，只保留 `source.kind === 'user'`，会自动剥离上个 Part 动态插入的 `dsh-memory/delta` 卡片消息。
    - **后果**：上个 Part 刚聊完“服务器 A”便触发日内换段，用户紧接着用代词提问（如“去看看**它**的日志”），新 Part 既未继承旧卡片、新消息里又不含实体别名，导致模型瞬间“断片”。
    - **解法**：日内换段时从搬运的 `recent` 原话中做一次轻量 `matchEntities / matchLessons` 预热注入，或在交接笔记中保留当前活跃实体名。
-8. **【磁盘与隐私】`artifacts/` 缺过期回收（GC）与主动遗忘联动**
+8. **【磁盘与隐私 · 🚧 部分在途 / 余项已建 [`dsh-ctrl#15`](https://github.com/5quan/dsh-ctrl/issues/15)】`artifacts/` 缺过期回收（GC）与主动遗忘联动**
    - **根因**：`ds-bot/src/host/ctrl/artifacts.js` 将所有 `> 12,000` 字符的工具输出持久化为 `~/.dsh/bot/artifacts/art-*.txt`，当前尚无 TTL 清理机制。
-   - **后果**：① 未绑定到任何 `Ticket.artifacts` 的临时工具输出（如随手 `cat` 大日志）长期累积会产生大量碎文件；② 用户调用 `memory_forget` 删除某段含敏感输出的历史时，`dsh-memory` 清理了 9 层但 `art-*.txt` 仍留在磁盘。
-   - **解法**：为未关联工单的临时 Artifact 增加默认 7–14 天空闲 GC，并提供按会话/时间窗口清理孤立 Artifact 的钩子。
+   - **进度与待办**：① 过期孤儿文件 GC（默认 14 天、保留工单引用句柄）已在 `dsh-ctrl#12`（`PR #14`）实现；② `memory_forget` 遗忘时联动清理对应会话/时间窗关联的孤儿 `art-*.txt` 已归入 [`dsh-ctrl#15`](https://github.com/5quan/dsh-ctrl/issues/15)。
 
 ---
 
-## 五、 双仓 Issue 归口建议（按仓库边界拆分执行）
+## 五、 双仓追踪落点总览
 
-遵循 `dsh-ctrl/docs/SPEC.md` 规范，后续动刀时按仓库拆分为两张独立 Issue 推进：
-
-- **`5quan/dsh-memory`（归入 Issue `#9` 或拆子单）**：负责上述第 **2、3、4、5（`subagent` 前缀策略）、6（`memory_search` 补扫卡片正文）** 项，以及修复 `src/dream.js` 日报 1800 字头部截断隐患。
-- **`5quan/dsh-ctrl`（新建上下文与生命周期对齐 Issue）**：负责上述第 **1（收敛 `read_own_chat` 与 `memory_search` 提示词冲突）、5（Worker 侧显式隔离记忆模式）、7（日内换段实体预热）、8（`artifacts` TTL 回收与遗忘清理）** 项。
+| 编号 | 事项 | 归属仓库 | 当前状态 |
+|---|---|---|---|
+| **第 5、6 项** | `subagent` 默认前缀隔离、只读工具边界、`memory_search` 卡片正文检索 | `5quan/dsh-memory` | ✅ 已合入（`#13` / PR `#14`） |
+| **第 1、5（白名单）、8（过期 GC）** | 检索提示词分工、Worker/Reviewer 工具白名单、Artifact 过期 GC | `5quan/dsh-ctrl` | 🚧 PR `#14` 待合入（`#12`） |
+| **第 2、3、4 项** | `USAGE_GUIDANCE` 路由精简、工具暴露收敛、`work/chat` 模式与 `archived` | `5quan/dsh-memory` | ⏳ 已登记在 Open Issue [`#9`](https://github.com/5quan/dsh-memory/issues/9) |
+| **第 7 项、第 8 项（遗忘联动）** | 日内重型换 Part 实体/避坑卡预热、`memory_forget` 联动清理孤儿 `art-*.txt` | `5quan/dsh-ctrl` | 📋 已建 Issue [`#15`](https://github.com/5quan/dsh-ctrl/issues/15) |
