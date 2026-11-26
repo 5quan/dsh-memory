@@ -1,5 +1,6 @@
 import { readdirSync, readFileSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
+import { detectPromptInjection, detectSecret } from './guard.js'
 import { formatProfileMeta, parseMetaParts } from './profile.js'
 import {
   atomicWriteFile,
@@ -30,6 +31,7 @@ export function parseEntityMarkdown(raw, slug) {
   let name = slug
   let type = 'general'
   let aliases = []
+  let status = 'active'
   const facts = []
   let inFacts = false
 
@@ -48,6 +50,12 @@ export function parseEntityMarkdown(raw, slug) {
       const typeMatch = /^[-*]\s*type:\s*(.+?)\s*$/i.exec(line)
       if (typeMatch) {
         type = typeMatch[1].trim() || 'general'
+        continue
+      }
+      const statusMatch = /^[-*]\s*status:\s*(.+?)\s*$/i.exec(line)
+      if (statusMatch) {
+        const val = statusMatch[1].trim().toLowerCase()
+        status = val === 'archived' ? 'archived' : 'active'
         continue
       }
       const aliasMatch = /^[-*]\s*aliases:\s*(.+?)\s*$/i.exec(line)
@@ -83,6 +91,7 @@ export function parseEntityMarkdown(raw, slug) {
     slug,
     name,
     type,
+    status,
     aliases: [...new Set(aliases)],
     facts,
     raw: String(raw ?? ''),
@@ -90,10 +99,12 @@ export function parseEntityMarkdown(raw, slug) {
 }
 
 export function serializeEntityMarkdown(entity) {
+  const status = entity.status === 'archived' ? 'archived' : 'active'
   const lines = [
     `# ${entity.name}`,
     '',
     `- type: ${entity.type || 'general'}`,
+    `- status: ${status}`,
     `- aliases: ${(entity.aliases ?? []).join(', ')}`,
     '',
     '## 事实记录',
@@ -162,20 +173,37 @@ export async function upsertEntity(home, options) {
     return { ok: false, reason: 'NAME_REQUIRED' }
   }
 
+  const op = options.op ?? 'add'
+  const rawContent = String(options.content ?? '').trim()
+  if (op !== 'retire' && rawContent !== '') {
+    const secret = detectSecret(rawContent)
+    if (secret.detected) {
+      return { ok: false, reason: secret.code, kind: secret.kind, message: secret.message }
+    }
+    if (options.blockPromptInjection !== false) {
+      const inj = detectPromptInjection(`${rawName}\n${rawContent}`)
+      if (inj.detected) {
+        return { ok: false, reason: inj.code, kind: inj.kind, message: inj.message }
+      }
+    }
+  }
+
   const existing = readEntity(home, rawName)
   const slug = existing?.slug ?? entitySlug(rawName)
   const entity = existing
     ? { ...existing, facts: [...existing.facts], aliases: [...existing.aliases] }
-    : { slug, name: rawName, type: 'general', aliases: [], facts: [] }
+    : { slug, name: rawName, type: 'general', status: 'active', aliases: [], facts: [] }
 
   if (typeof options.type === 'string' && options.type.trim() !== '') {
     entity.type = options.type.trim()
+  }
+  if (options.status === 'active' || options.status === 'archived') {
+    entity.status = options.status
   }
   if (Array.isArray(options.aliases)) {
     entity.aliases = mergeUniqueTerms(entity.aliases, options.aliases)
   }
 
-  const op = options.op ?? 'add'
   let factId
 
   if (op === 'add') {
@@ -248,6 +276,7 @@ export function matchEntitiesInText(home, text) {
   const matched = []
 
   for (const entity of entities) {
+    if (entity.status === 'archived') continue
     const triggers = [entity.name, ...entity.aliases]
     let bestIndex = -1
     let bestTrigger
@@ -317,7 +346,7 @@ export function searchEntities(home, { query = '', limit = 10 } = {}) {
         source: fact.source || '',
         added: fact.added || '',
       })),
-      ...extractExtraCardLines(entity.raw, '事实记录', /^[-*]\s*(?:type|aliases):/i).map(line => ({
+      ...extractExtraCardLines(entity.raw, '事实记录', /^[-*]\s*(?:type|status|aliases):/i).map(line => ({
         content: line,
       })),
     ],

@@ -1,8 +1,9 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { VALID_MEMORY_MODES } from './config.js'
+import { VALID_MEMORY_MODES, VALID_SCENE_MODES } from './config.js'
 import { MemoryGuardError } from './guard.js'
 import * as defaultProfileApi from './profile.js'
 import { clipText, logicalDateOf } from './util.js'
+import { rrfMerge } from './vector.js'
 
 const stringOutput = {
   schema: { type: 'string' },
@@ -77,6 +78,12 @@ function formatContextWindowLines(ctxRes, { maxCharsPerMessage = 800, maxTotalCh
     .filter(Boolean)
 }
 
+const COMPACT_HIDDEN_ADMIN_TOOLS = new Set([
+  'memory_dream_now',
+  'memory_digest_now',
+  'memory_rollback',
+])
+
 export function createToolsApi({
   ctx,
   config,
@@ -92,6 +99,7 @@ export function createToolsApi({
   briefingApi,
   profileApi = defaultProfileApi,
   dreamApi,
+  vectorApi,
   clock = { now: () => Date.now() },
 }) {
   function currentLogicalDate() {
@@ -170,13 +178,72 @@ export function createToolsApi({
             || a.slug.localeCompare(b.slug))
           .slice(0, limit)
 
-        if (msgHits.length === 0 && journalHits.length === 0 && cardHits.length === 0) {
+        const vectorHits = rawQuery && config.retrieval?.vector?.enabled === true && vectorApi
+          ? vectorApi.search({
+            query: rawQuery,
+            scope,
+            dateFrom,
+            dateTo,
+            limit,
+            minScore: config.retrieval?.vector?.minScore,
+          })
+          : []
+
+        const rrfHits = vectorHits.length > 0
+          ? rrfMerge([
+            [
+              ...cardHits.map(h => ({
+                key: `${h.kind}:${h.slug}`,
+                kind: h.kind,
+                title: h.name,
+                snippet: h.snippet,
+                sourceChannel: 'card',
+              })),
+              ...journalHits.map(h => ({
+                key: `journal:${h.date}`,
+                kind: 'journal',
+                title: `${h.date}${h.section ? ` · ${h.section}` : ''}`,
+                snippet: h.line,
+                sourceChannel: 'journal',
+              })),
+              ...msgHits.map(h => ({
+                key: `msg:${h.anchor}`,
+                kind: 'archive',
+                title: h.anchor,
+                snippet: clipText(h.text, 240),
+                sourceChannel: 'fts5',
+              })),
+            ],
+            vectorHits.map(vh => ({
+              key: vh.docKey,
+              kind: vh.kind,
+              title: vh.title || vh.docKey,
+              snippet: vh.snippet,
+              vectorScore: vh.score,
+              sourceChannel: 'vector',
+            })),
+          ], {
+            k: config.retrieval?.vector?.rrfK ?? 60,
+            limit,
+          })
+          : []
+
+        if (msgHits.length === 0 && journalHits.length === 0 && cardHits.length === 0 && vectorHits.length === 0) {
           return rawQuery
             ? `No memory matches found for "${rawQuery}".`
             : 'No archived messages found for the specified date range.'
         }
 
         const sections = []
+        if (rrfHits.length > 0) {
+          sections.push(
+            '### Hybrid / Semantic Matches (RRF)',
+            ...rrfHits.map((hit) => {
+              const vs = hit.vectorScore !== undefined ? `, vec=${hit.vectorScore.toFixed(2)}` : ''
+              return `- [${hit.key} (${hit.sources.join('+')}, rrf=${hit.rrfScore.toFixed(4)}${vs})] ${hit.snippet}`
+            }),
+          )
+        }
         if (cardHits.length > 0) {
           sections.push(
             '### Card Matches',
@@ -436,31 +503,58 @@ export function createToolsApi({
 
     defineMemoryTool({
       name: 'memory_mode_set',
-      description: 'Switch memory/incognito mode ("full", "read-only", or "off") for the current session or global default.',
+      description: 'Switch memory mode ("full", "read-only", "off") and/or scene mode ("work", "chat") for the current session or global default.',
       parameters: {
-        mode: { type: 'string', enum: ['full', 'read-only', 'off'], required: true, description: 'Target memory mode.' },
-        scope: { type: 'string', enum: ['session', 'global'], description: 'Apply to current "session" (default) or "global" defaultMode.' },
+        mode: { type: 'string', enum: ['full', 'read-only', 'off'], description: 'Optional target memory mode.' },
+        scene: { type: 'string', enum: ['work', 'chat'], description: 'Optional target scene mode ("work" injects work journals & cards; "chat" silences work context).' },
+        scope: { type: 'string', enum: ['session', 'global'], description: 'Apply to current "session" (default) or "global" default.' },
       },
       output: stringOutput,
       async execute(args, exec) {
-        if (!VALID_MEMORY_MODES.has(args.mode)) {
+        const hasMode = args.mode !== undefined
+        const hasScene = args.scene !== undefined
+        if (!hasMode && !hasScene) {
+          return 'Please specify at least one of "mode" (full/read-only/off) or "scene" (work/chat).'
+        }
+        if (hasMode && !VALID_MEMORY_MODES.has(args.mode)) {
           return `Invalid mode "${args.mode}". Use full, read-only, or off.`
         }
+        if (hasScene && !VALID_SCENE_MODES.has(args.scene)) {
+          return `Invalid scene "${args.scene}". Use work or chat.`
+        }
+
         const targetScope = args.scope ?? 'session'
         if (targetScope === 'global') {
-          config.defaultMode = args.mode
+          const changes = []
+          if (hasMode) {
+            config.defaultMode = args.mode
+            changes.push(`defaultMode="${args.mode}"`)
+          }
+          if (hasScene) {
+            config.defaultScene = args.scene
+            changes.push(`defaultScene="${args.scene}"`)
+          }
           contextApi.invalidateSnapshots()
-          return `Global default memory mode set to "${args.mode}".`
+          return `Global ${changes.join(', ')} updated.`
         }
+
         const sessionId = exec.agent?.id
         if (!sessionId) {
           return 'No active session id available for session-scoped mode change.'
         }
-        store.setSessionMode(sessionId, args.mode, clock.now())
-        if (args.mode === 'off') {
+        const changes = []
+        if (hasMode) {
+          store.setSessionMode(sessionId, args.mode, clock.now())
+          changes.push(`memory mode="${args.mode}"`)
+        }
+        if (hasScene) {
+          store.setSessionScene(sessionId, args.scene, clock.now())
+          changes.push(`scene="${args.scene}"`)
+        }
+        if (args.mode === 'off' || hasScene) {
           contextApi.invalidateSnapshots({ sessionId })
         }
-        return `Session ${sessionId} memory mode set to "${args.mode}".`
+        return `Session ${sessionId} ${changes.join(', ')} set.`
       },
     }),
 
@@ -704,6 +798,7 @@ export function createToolsApi({
         aliases: { type: 'array', items: { type: 'string' }, description: 'Aliases that automatically trigger dynamic context injection.' },
         content: { type: 'string', description: 'Fact content to add or replace.' },
         op: { type: 'string', enum: ['add', 'replace', 'retire'], description: 'Fact mutation operation on upsert (default "add").' },
+        status: { type: 'string', enum: ['active', 'archived'], description: 'Lifecycle status ("archived" silences automatic recall while keeping search visibility).' },
         supersedesId: { type: 'string', description: 'Existing fact id (e.g. ent_01) to replace or retire.' },
         pinned: { type: 'boolean', description: 'Pin this fact against automated deletion.' },
         force: { type: 'boolean', description: 'Force delete even when the entity holds pinned facts.' },
@@ -723,7 +818,7 @@ export function createToolsApi({
           const entities = entityApi.listEntities(config.home)
           if (entities.length === 0) return 'No entity cards saved yet.'
           return entities
-            .map(e => `- ${e.name} [${e.slug}] (${e.type}; aliases: ${e.aliases.join(', ') || 'none'}; facts: ${e.facts.length})`)
+            .map(e => `- ${e.name} [${e.slug}]${e.status === 'archived' ? ' [archived]' : ''} (${e.type}; aliases: ${e.aliases.join(', ') || 'none'}; facts: ${e.facts.length})`)
             .join('\n')
         }
 
@@ -749,6 +844,7 @@ export function createToolsApi({
         const res = await entityApi.upsertEntity(config.home, {
           name,
           type: args.type,
+          status: args.status,
           aliases: args.aliases,
           op: args.op ?? 'add',
           content: args.content,
@@ -757,11 +853,12 @@ export function createToolsApi({
           source: latestUser?.anchor ?? 'manual',
           pinned: args.pinned === true,
           allowPinned: true,
+          blockPromptInjection: config.guard?.blockPromptInjection !== false,
         })
         if (!res.ok) {
-          return `Failed to upsert entity "${name}": ${res.reason}.`
+          return `Failed to upsert entity "${name}": ${res.reason}${res.message ? ` (${res.message})` : ''}.`
         }
-        return `Updated entity "${res.entity.name}" (${res.slug})${res.factId ? `, fact=${res.factId}` : ''}.`
+        return `Updated entity "${res.entity.name}" (${res.slug}, status=${res.entity.status ?? 'active'})${res.factId ? `, fact=${res.factId}` : ''}.`
       },
     }),
 
@@ -775,6 +872,7 @@ export function createToolsApi({
         triggers: { type: 'array', items: { type: 'string' }, description: 'Keywords or phrases that automatically trigger dynamic context injection.' },
         content: { type: 'string', description: 'Lesson/pitfall content to add or replace.' },
         op: { type: 'string', enum: ['add', 'replace', 'retire'], description: 'Entry mutation operation on upsert (default "add").' },
+        status: { type: 'string', enum: ['active', 'archived'], description: 'Lifecycle status ("archived" silences automatic recall while keeping search visibility).' },
         supersedesId: { type: 'string', description: 'Existing lesson entry id (e.g. les_01) to replace or retire.' },
         pinned: { type: 'boolean', description: 'Pin this entry against automated deletion.' },
         expires: { type: 'string', description: 'Optional expiration date (YYYY-MM-DD) for temporary operational caveats.' },
@@ -796,7 +894,7 @@ export function createToolsApi({
           const lessons = lessonApi.listLessons(config.home)
           if (lessons.length === 0) return 'No lesson cards saved yet.'
           return lessons
-            .map(l => `- ${l.name} [${l.slug}] (tags: ${l.tags.join(', ') || 'none'}; triggers: ${l.triggers.join(', ') || 'none'}; entries: ${l.entries.length})`)
+            .map(l => `- ${l.name} [${l.slug}]${l.status === 'archived' ? ' [archived]' : ''} (tags: ${l.tags.join(', ') || 'none'}; triggers: ${l.triggers.join(', ') || 'none'}; entries: ${l.entries.length})`)
             .join('\n')
         }
 
@@ -823,6 +921,7 @@ export function createToolsApi({
           : undefined
         const res = await lessonApi.upsertLesson(config.home, {
           name,
+          status: args.status,
           tags: args.tags,
           triggers: args.triggers,
           op: args.op ?? 'add',
@@ -833,6 +932,7 @@ export function createToolsApi({
           source: latestUser?.anchor ?? 'manual',
           pinned: args.pinned === true,
           allowPinned: true,
+          blockPromptInjection: config.guard?.blockPromptInjection !== false,
         })
         if (!res.ok) {
           return `Failed to upsert lesson "${name}": ${res.reason}${res.message ? ` (${res.message})` : ''}.`
@@ -1127,11 +1227,29 @@ export function createToolsApi({
     }),
   ]
 
+  function isToolEnabledInContext(toolName, context) {
+    if (context?.agent?.session?.header?.origin === 'subagent') {
+      return SUBAGENT_READ_ONLY_TOOLS.has(toolName) || SUBAGENT_READ_ONLY_ACTIONS.has(toolName)
+    }
+    if ((config.tools?.profile ?? 'compact') === 'compact') {
+      if (COMPACT_HIDDEN_ADMIN_TOOLS.has(toolName)) return false
+      if (toolName === 'memory_onboarding') {
+        const sessionId = context?.agent?.id
+        const scope = sessionScopeOf(sessionId)
+        return onboardingApi?.getState?.({ scope })?.needsOnboarding === true
+      }
+    }
+    return true
+  }
+
   function install() {
     for (const tool of tools) {
-      ctx.effect(() => ctx.tools.register(tool), `dsh-memory: tool ${tool.name}`)
+      ctx.effect(
+        () => ctx.tools.register(tool, { when: context => isToolEnabledInContext(tool.name, context) }),
+        `dsh-memory: tool ${tool.name}`,
+      )
     }
   }
 
-  return { install, tools }
+  return { install, tools, isToolEnabledInContext }
 }

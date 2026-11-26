@@ -83,6 +83,65 @@ export function detectSecret(text) {
   return { detected: false }
 }
 
+const PROMPT_INJECTION_RULES = [
+  {
+    kind: 'role_hijack_markup',
+    re: /<\/?(?:system|system-reminder|developer|instructions|tool_call|function_call)\b[^>]*>|(?:^|\n)\s*(?:SYSTEM\s+OVERRIDE|JAILBREAK|ADMIN\s+MODE|DEVELOPER\s+OVERRIDE)\s*[:：]/i,
+    message: 'Refused to store hidden role/system markup injection directive in memory.',
+  },
+  {
+    kind: 'instruction_override',
+    re: /(?:ignore|disregard|forget|override|bypass)\s+(?:all\s+|any\s+|the\s+)?(?:(?:previous|prior|earlier|above|system|safety|security|existing)\s+)+(?:instructions|prompts?|rules?|constraints?|guardrails?)|(?:忽略|无视|忘记|覆盖|绕过|废除)\s*(?:(?:之前|先前|此前|以上|所有|一切|既有|全部)\s*)*(?:系统|安全|红线|保密)(?:规则|指令|提示词|约束|限制)|(?:忽略|无视|忘记|覆盖|绕过|废除)\s*(?:(?:之前|先前|此前|以上|所有|一切|既有|全部)\s*)+(?:规则|指令|提示词|约束|限制)/i,
+    message: 'Refused to store instruction-override prompt injection in memory.',
+  },
+  {
+    kind: 'approval_bypass',
+    re: /(?:auto[-_\s]?approve|automatically\s+approve|skip\s+(?:all\s+|human\s+)?(?:approval|confirmation|safety\s+checks?)|bypass\s+(?:approval|permission|guard))|(?:自动批准(?:所有|全部|一切)?|跳过(?:所有|全部|人工)?(?:确认|审批|安全检查)|免审批(?:执行|所有)?|绕过(?:权限|审批|防护))/i,
+    message: 'Refused to store approval-bypass or safety-skipping directive in memory.',
+  },
+  {
+    kind: 'exfiltration_directive',
+    re: /(?:silently|secretly|quietly|without\s+telling\s+(?:the\s+)?user)\s+(?:send|upload|exfiltrate|post|leak|transmit)\b.*?(?:https?:\/\/|token|secret|key|env|credential|file)|(?:悄悄|偷偷|背地里|不要告诉用户|隐蔽地)(?:将|把)?.*?(?:密钥|密码|token|凭证|环境变量|\.env).*?(?:发送|上传|传到|回传|外发)/i,
+    message: 'Refused to store stealth exfiltration directive in memory.',
+  },
+  {
+    kind: 'tool_coercion',
+    re: /(?:silently|automatically|without\s+asking)\s+(?:execute|run)\b.*?(?:rm\s+-rf|curl\s+[^|\n]*\|\s*(?:sh|bash)|powershell\s+-enc)|(?:每次(?:会话|启动|响应)都)?(?:静默|偷偷|自动)执行\s*(?:`?(?:rm\s+-rf|curl\s+[^|\n]*\|\s*(?:sh|bash)|powershell\s+-enc))/i,
+    message: 'Refused to store coercive hidden shell payload directive in memory.',
+  },
+]
+
+/**
+ * Detect high-confidence prompt injection / memory poisoning payloads while
+ * allowing benign user preferences and engineering safety rules.
+ */
+export function detectPromptInjection(text) {
+  const input = String(text ?? '')
+  if (input.trim() === '') return { detected: false }
+
+  for (const rule of PROMPT_INJECTION_RULES) {
+    if (rule.re.test(input)) {
+      return {
+        detected: true,
+        code: 'INJECTION_DETECTED',
+        kind: rule.kind,
+        message: rule.message,
+      }
+    }
+  }
+  return { detected: false }
+}
+
+export function checkMemorySafety(text, { blockPromptInjection = true } = {}) {
+  const secret = detectSecret(text)
+  if (secret.detected) return secret
+  if (blockPromptInjection !== false) {
+    const inj = detectPromptInjection(text)
+    if (inj.detected) return inj
+  }
+  return { detected: false }
+}
+
 export function checkDuplicateContent({
   content,
   scope = 'default',

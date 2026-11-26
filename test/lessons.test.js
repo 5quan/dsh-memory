@@ -75,9 +75,12 @@ test('store migrates v2 archive.sqlite cleanly to v3 with injected_lessons colum
     rmSync(dir, { recursive: true, force: true, maxRetries: 5 })
   })
 
-  assert.equal(store.db.prepare('PRAGMA user_version').get().user_version, 3)
+  assert.equal(store.db.prepare('PRAGMA user_version').get().user_version, 4)
   const cols = store.db.prepare("PRAGMA table_info('session_state')").all().map(c => c.name)
   assert.equal(cols.includes('injected_lessons'), true)
+  assert.equal(cols.includes('scene_mode'), true)
+  const embTable = store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='embeddings'").get()
+  assert.equal(embTable?.name, 'embeddings')
 
   const oldRow = store.getSessionState('s-old')
   assert.deepEqual(oldRow.injectedEntities, ['ent-a'])

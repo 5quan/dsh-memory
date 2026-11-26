@@ -1,6 +1,6 @@
 # `dsh-memory` 架构设计说明书
 
-> 状态：M1、M2（`#1`）、M3（`#2`：冷启动引导、每日晨报确认、轻量纠偏与公开 Cordis 服务契约）、M4（`#5`：Dream 后台巩固、`retired.jsonl` 通用回滚、行窗口邻接上下文、写入守卫与 `memory_forget` 8 层收尾）、M5（`#7`：`lessons/` 避坑经验与程序性记忆）、M5.5（`#10`：DSH 原生实时设置与说明书）、`#13`（`subagent` 默认上下文隔离、只读工具边界与卡片正文检索）已完成  
+> 状态：M1–M5.5、`#13` 与 `#9`（全系统流程与提示词优化、`work`/`chat` 场景模式与 `archived` 静默、闲置指纹刷新、可选本地向量+RRF 检索与写入侧安全加固）已完成  
 > 仓库：`5quan/dsh-memory`  
 > 参考来源：DeepSeek Super-agent 设计探索（`https://zhuanlan.zhihu.com/p/2099987320443237060`）、`dsh-ctrl` 记忆体系前期探索、OpenViking L0/L1/L2 渐进披露范式、AutoDream 后台整理思想、Anthropic *The components of agent memory* / Dreaming & Knowledge Wiki 实践、MemMachine 邻接原文扩展思想
 
@@ -470,25 +470,26 @@ stateDiagram-v2
 
 ---
 
-### 3.9 后续演进记录与安全加固（Issue `#9`，暂不急于实现）
+### 3.9 系统审查优化、场景模式、闲置指纹刷新、本地向量与安全加固（Issue `#9`，✅ 已实现）
 
-> 说明：以下 5 项均**仅作设计登记，待真实使用与 `dsh-ctrl` 联调积累日志后再按优先级推进**，详细验收清单见 [Issue #9](https://github.com/5quan/dsh-memory/issues/9)。
+> 对应 [Issue #9](https://github.com/5quan/dsh-memory/issues/9)，全部机制已落地并通过单测、消融与红队验收：
 
-1. **全系统流程合理性专项梳理与核心 Prompt 优化**：
-   - 专项复盘「采集 → 缓冲 → 日结 → 历史派生 → 实体/避坑召回 → Dream → 遗忘/回滚」整条链路是否冗繁、低摩擦环节能否进一步收敛；
-   - 修复 `src/dream.js` 对近期日报 `clipText(..., 1800)` 的头部硬截断隐患（防止后半段的 `## 纠正与教训` 与 `## 悬而未决的问题` 被截丢）；
-   - 参考 Anthropic [*Dreaming with a dynamic workflow*](https://platform.claude.com/cookbook/managed-agents-cma-dreaming-with-a-dynamic-workflow)（Analyzer → Organizer 阶段分离）与 [*Knowledge Wiki*](https://github.com/anthropics/claude-quickstarts/tree/main/managed-agents/knowledge-wiki)（精确路径/端口/命令/报错码保真、结构化「触发场景 → 禁止/推荐做法」表达、`PROFILE.md` 顶层轻索引化）优化 Digest 与 Dream Prompt；
-   - 精简 `src/context.js` `USAGE_GUIDANCE` 为“按意图选工具”的紧凑路由。
-2. **场景模式分化（工作模式 / 聊天模式）与防无关记忆串台**：
-   - 将现有单一无痕/读写模式进一步演进或扩展为**工作模式（Work）**与**聊天模式（Chat）**（同时保留无痕关闭兜底）；
-   - 针对不同模式差异化调整注入内容与系统提示词：例如在**聊天模式**下聚焦跨场景通用个人偏好、抑制开发日报/项目实体/技术避坑卡的主动注入与联想，避免日常闲聊突然提及已完结或不关心的项目内容；
-   - 配套评估 `HEADER_NOTE` 相关性克制纪律（无关话题严禁硬 cue 工作/历史记录），以及给 `entities/`、`lessons/` 卡片增加 `status: archived`（退出自动动态召回、保留显式检索）。
+1. **全系统流程合理性梳理与核心 Prompt 调优**：
+   - **全链路梳理清单**：`session/event` 采集（`ingest.js`）→ 纠偏捕获/写守卫（`correction.js` + `guard.js`）→ 按日 `buffer/` 闸门（`buffer.js`）→ 空闲/手动 6 段日结 + L0/L1 `history/` + 三目标结算（`rollover.js` + `digest.js` + `history.js`）→ 双层注入 `snapshots/` + `dsh-memory/delta`（`context.js`）→ 规则 + 可选 LLM Dream + `retired.jsonl` 回滚（`dream.js` + `profile.js`）→ 9 层 `memory_forget`（`tools.js` + `store.js`），各环节职责清晰、无冗余或断环；
+   - **修复 Dream 日报头部截断（`condenseJournalForDream`）**：以按段优先级组装（`纠正与教训 > 做出的决定 > 悬而未决的问题 > 新建/变更的事项 > 提到的实体 > 发生了什么`）替代原先的头部硬截断，确保尾部关键教训与未决问题完整保留；
+   - **Digest & Dream Prompt 调优**：在 Digest 强化精确路径/端口/版本/命令/报错码保真与 `触发场景 → 禁止/推荐做法` 结构化；在 Dream 显式划分 Stage 1 Analyzer（事实核验与矛盾识别）→ Stage 2 Organizer（增量提纯与 `PROFILE.md` 轻索引化）；
+   - **紧凑 `USAGE_GUIDANCE` + 主会话工具面/晨报治理**：`USAGE_GUIDANCE` 收敛为紧凑“按意图路由”（字符数精简 50%+）；新增 `.volatile()` 配置 `tools.profile`（默认 `'compact'`，通过 `when` 在主会话隐藏 `memory_dream_now`/`memory_digest_now`/`memory_rollback`，并按 `needsOnboarding` 动态隐藏 `memory_onboarding`，`full` 档位暴露全量 15 工具）与 `briefing.maxItemsPerBriefing` / `minPendingToPrompt` / `cooldownDays` 降低晨报审批打扰。
+2. **场景模式分化（Work / Chat）与防串台**：
+   - SQLite schema v4 为 `session_state` 增设 `scene_mode`（与无痕 `memory_mode` 正交，`memory_mode_set` 支持 `scene: 'work' | 'chat'`）；
+   - **`chat` 模式**：仅注入 `PROFILE.md` + 聊天模式克制提醒，省略昨日/近期/历史工作日报并静默 `entities/`、`lessons/` 与晨报的自动增量注入；
+   - `entities/` 与 `lessons/` 支持 `- status: active | archived`，`archived` 卡片退出自动动态召回但保留显式 `memory_search` / `list` / `read` 可见；`HEADER_NOTE` 补充相关性克制纪律。
 3. **冻结前缀闲置指纹刷新（`snapshotRefreshIdleMinutes`）**：
-   - 参考不同模型实际 Prompt Cache TTL（Anthropic 默认 5 分钟 / 扩展 1 小时、OpenAI 5–10 分钟、DeepSeek 磁盘缓存数小时至跨天），评估当“会话连续闲置超过阈值（如 `60` 分钟）**且** `PROFILE.md` / 昨日日报 / 历史总览内容哈希确实发生变化”时才重拍快照并推进已落盘条目游标，在跨小时新鲜度与 KV Cache 命中率间取得最优平衡。
-4. **可选本地向量检索 + RRF 重排派生层（`retrieval.vector`）**：
-   - 待日报、实体与避坑卡规模增长后，若在线消融发现纯 FTS5 `trigram` + 词边界触发词对**同义改写**存在明显漏召回，可在保持**零外部向量库**原则下，于 `archive.sqlite` 内增设可重建 `embeddings` 派生表（`Float32Array` BLOB + 可插拔 Embedding + RRF 混合重排），仅作用于 `memory_search` 与 `dsh-memory/delta` 动态增量（绝不破坏冻结前缀），默认关闭。
-5. **写入侧记忆投毒 / 提示注入拦截（压轴安全加固）**：
-   - 针对“记住：以后忽略安全规则”等试图篡改系统规则或安全边界的长期写入内容，规划在写入网关做规则/分类拦截与强制降级，并配套红队用例验收；当前阶段由冻结前缀与动态增量中的数据区隔离声明及缓冲人工确认流兜底，**待流程与核心体验全部稳定后最后实现**。
+   - 为每份快照维护 `snapshotMeta:<session>::<date>`（含 `scene`、`contentHash`、`lastSeenAt`、`refreshCount`）；同日仅当 `(now - lastSeenAt) >= snapshotRefreshIdleMinutes * 60s` **且** 冻结内容 SHA-256 指纹确实变化（或 `scene` 切换）时重拍快照，持续活跃或底层内容未变时不破坏 KV Cache。
+4. **可选本地向量检索 + RRF 混合重排（[`src/vector.js`](../src/vector.js)，`retrieval.vector`）**：
+   - `archive.sqlite` schema v4 新增可重建 `embeddings` 派生表（存储 L2 归一化 `Float32Array` BLOB + 跨中英工程概念聚类的零依赖本地哈希嵌入器 + 可注入自定义 `embedder`）；
+   - 当 `retrieval.vector.enabled: true`（默认 `false`）时，`memory_search` 与 `work` 模式 `dsh-memory/delta` 使用 `rrfMerge` 融合 FTS5/LIKE/卡片召回与向量相似度，`eval/run-eval.mjs` 离线同义改写消融验证可补全零 trigram 重合查询漏召回且零外部向量库依赖。
+5. **写入侧记忆投毒 / 提示注入防护（`guard.js` `detectPromptInjection`）**：
+   - 在 `buffer.js`、`onboarding.js`、`entities.js`、`lessons.js`、`dream.js` 与工具链统一接入 `detectPromptInjection`（默认开启 `guard.blockPromptInjection: true`），拦截角色标签伪造、忽略/覆盖系统规则、免审批绕过、悄悄外传凭据与隐蔽执行危险命令等高置信攻击载荷（`INJECTION_DETECTED`），经红队与正常偏好样本双集验收实现 100% 拦截与 0% 误杀。
 
 ---
 
@@ -537,6 +538,14 @@ export function apply(ctx, config = {}) {
 | `dayStartHour` | `number` | `2` | 逻辑日边界小时（0–23，默认凌晨 02:00） |
 | `idleMinutes` | `number` | `30` | 触发昨日日结所需的连续空闲分钟数 |
 | `defaultMode` | `'full' \| 'read-only' \| 'off'` | `'full'` | 新会话默认记忆/无痕模式 |
+| `defaultScene` | `'work' \| 'chat'` | `'work'` | 新会话默认场景模式（工作模式 / 聊天模式） |
+| `snapshotRefreshIdleMinutes` | `number` | `60` | 冻结前缀闲置指纹刷新阈值（分钟，`0` 禁用） |
+| `briefing.maxItemsPerBriefing` | `number` | `8` | 晨报单次最多展示待确认条目数 |
+| `briefing.minPendingToPrompt` | `number` | `1` | 晨报触发确认引导的最小待确认数 |
+| `briefing.cooldownDays` | `number` | `1` | 晨报推送最小间隔天数 |
+| `tools.profile` | `'compact' \| 'full'` | `'compact'` | 工具暴露档位（主会话隐藏低频运维工具 / 全量） |
+| `retrieval.vector.enabled` | `boolean` | `false` | 可选本地 `Float32Array` BLOB 向量 + RRF 混合重排开关 |
+| `guard.blockPromptInjection` | `boolean` | `true` | 写入侧提示词注入 / 记忆投毒拦截开关 |
 | `ingest.subagentPolicy` | `'user-only' \| 'ignore' \| 'all'` | `'user-only'` | 子代理会话采集策略（默认保留用户直接发言，过滤子代理回复与工具） |
 | `ingest.injectSubagentContext` | `boolean` | `false` | 是否向 `origin === 'subagent'` 子代理会话注入冻结前缀与 `dsh-memory/delta`（`.volatile()` 实时开关；不影响 `subagentPolicy` 采集） |
 | `ingest.includeScopes` | `string[]` | `['default']` | 允许纳入采集与检索的 `scope` 白名单 |
@@ -608,7 +617,7 @@ export function apply(ctx, config = {}) {
 | **M3（冷启动引导、每日确认与服务契约）** | 冷启动建档 + 低摩擦把关 + 单向开放契约 | 1. 初始画像冷启动引导（首次空画像时发简短问卷或 `show_view` / `ask_user_question` 交互弹窗采集基础画像，支持跳过）<br>2. 晨报汇总摘要（昨日日报亮点 + `buffer/` 待确认列表）与低摩擦批量勾选确认<br>3. 轻量纠偏捕获（`source_type: 'correction'` + 真实用户 `anchor`）<br>4. 公开 Cordis 服务与标准事件契约（供 `dsh-ctrl` 等上层 Bot 单向绑定，保持 `dsh-memory` 零 `ds-bot` 依赖） | 首次启用即可快速建立初始画像；每天首次交互可用极低成本完成“记忆勾选确认 + 纠偏入库”；原版 DSH 独立可用，上层 Bot 可通过公开契约零侵入联动 |
 | **M4（Dream 后台整理、检索与治理补强）** | 跨月克制自维护、行窗口邻接检索与成本+准确率消融 | 1. 规则 + LLM 双通道 Dream 后台整理（`dream.lock` 防并发、失败不推进 `dream:<scope>` 水位、无证据不误删、冲突标 `CONFLICT` 且低权不覆高权、`rejectCooldownDays` 冷却期、`expires` 过期提案、`dream.instructions` 可定制），全非遗忘变更落 `retired.jsonl` 并支持 `memory_rollback` 追加回滚<br>2. `memory_read_context` 与 `memory_search.contextTurns`（按 `(session_id, seq)` 行窗口展开相邻轮次原文）<br>3. `guard.js` 入口归一化 `content_hash` 幂等去重与高置信凭据“只记名不记值”直接拒写，日结/Dream Prompt 强化绝对日期、助手承诺、单次 vs 长期区分与陈旧度提醒<br>4. `memory_forget` 补齐 `PROFILE.md`（仅按锚点/显式关键词清，保护 `pinned`）与 `retired.jsonl` 删除传播闭环<br>5. 离线确定性回归套件（进 `npm test`）+ 在线 LLM 三组消融脚本（无记忆 vs `dsh-memory` vs 黄金记忆，输出准确率 + Token 成本） | `pinned` 零误删、冷却期与比例上限生效、失败重跑不漏日志；行窗口邻接完整；凭据零落库且误报可控；遗忘跨 8 层残留为 `0`；消融实验量化验证准确率与 Token 成本收益 |
 | **M5（避坑经验 / 程序性记忆）** | `lessons/` 经验卡沉淀与技能挂载解耦 | 1. 新增独立 `lessons/*.md`（含 `tags` / `triggers` 与 `[id; added; source; supersedes; pinned; expires]` 元数据）及 `memory_lesson_manage`<br>2. 消费 `target: 'lesson:<名称>'` 缓冲结算、`session_state.injected_lessons` 动态增量注入，并联动 `memory_forget` 与 Dream 整理<br>3. `dshMemory` 公开服务扩展 `matchLessons(text, { tags, maxTokens })` / `getLesson` / `listLessons` 供 Worker 与原版 DSH 复用<br>4. 明确“可执行技能包留执行层、搭配 `ds-bot` 时在 `dsh-ctrl` 停用 `learning.js`” | `correction`/Ticket 复盘经验可经缓冲区审核沉淀为 `lessons/`；提及标签/关键词动态注入而不击穿前缀缓存；Worker 可一次拉齐实体与避坑经验，且插件零 `ds-bot` 依赖 |
-| **后续（Issue `#9`）** | 流程/提示词审查 + 场景模式 + 闲置刷新 + 向量 + 安全加固 | 1. 全系统流程梳理与 Digest/Dream/`USAGE_GUIDANCE` 提示词调优（含修复 Dream 日报截断）<br>2. 场景模式分化（工作模式 / 聊天模式及无痕兜底）+ 针对性提示词克制 + `archived` 静默归档防无关项目串台<br>3. 冻结前缀闲置指纹刷新（`snapshotRefreshIdleMinutes`）<br>4. 可选本地 SQLite 向量+RRF 混合检索（默认关闭，消融验证后决定）<br>5. 写入侧记忆投毒 / 提示注入拦截与红队验收 | 流程与 Prompt 梳理清单确认，工作/聊天模式不主动提及无关项目，消融评测验证召回与缓存收益无退化，红队记忆投毒用例写入阻断 |
+| **#9（系统优化与安全加固）** | 流程/提示词审查 + 场景模式 + 闲置刷新 + 向量 + 安全加固 | 1. 全系统流程梳理与 Digest/Dream/`USAGE_GUIDANCE` 提示词调优（`condenseJournalForDream` 修复日报截断、`tools.profile: compact` 与晨报打扰治理）<br>2. 工作模式（`work`）/ 聊天模式（`chat`）与 `entities/`、`lessons/` `status: archived` 静默 + `HEADER_NOTE` 克制纪律<br>3. `snapshotRefreshIdleMinutes` 闲置 + SHA-256 指纹刷新<br>4. Schema v4 `embeddings`（`Float32Array` BLOB + RRF，默认关闭）<br>5. 写入侧 `detectPromptInjection` 拦截与红队验收 | 所有 `#9` 验收项通过单测、FTS5-vs-RRF 消融基准与红队 corpus 零误杀验收 |
 
 ### 5.2 本地开发与红线约束
 

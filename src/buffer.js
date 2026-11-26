@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { readdirSync, readFileSync } from 'node:fs'
 import { appendFile, mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
-import { checkDuplicateContent, detectSecret, MemoryGuardError } from './guard.js'
+import { checkDuplicateContent, detectPromptInjection, detectSecret, MemoryGuardError } from './guard.js'
 import * as defaultProfileApi from './profile.js'
 import { mergeUniqueTerms } from './util.js'
 
@@ -26,7 +26,7 @@ export function isValidTarget(target) {
   )
 }
 
-export function createBufferApi({ home, profileApi = defaultProfileApi, lessonApi, clock = { now: () => Date.now() } }) {
+export function createBufferApi({ home, config, profileApi = defaultProfileApi, lessonApi, clock = { now: () => Date.now() } }) {
   let writeChain = Promise.resolve()
 
   const queued = (task) => {
@@ -138,6 +138,12 @@ export function createBufferApi({ home, profileApi = defaultProfileApi, lessonAp
     const secret = detectSecret(content)
     if (secret.detected) {
       return Promise.reject(new MemoryGuardError(secret.code, secret.message, { kind: secret.kind }))
+    }
+    if (config?.guard?.blockPromptInjection !== false) {
+      const inj = detectPromptInjection(content)
+      if (inj.detected) {
+        return Promise.reject(new MemoryGuardError(inj.code, inj.message, { kind: inj.kind }))
+      }
     }
 
     return queued(async () => {

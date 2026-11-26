@@ -71,9 +71,12 @@ test('store migrates v1 archive.sqlite cleanly to v2 with memory_meta table', (t
   })
 
   const version = store.db.prepare('PRAGMA user_version').get().user_version
-  assert.equal(version, 3)
+  assert.equal(version, 4)
   const cols = store.db.prepare("PRAGMA table_info('session_state')").all().map(c => c.name)
   assert.equal(cols.includes('injected_lessons'), true)
+  assert.equal(cols.includes('scene_mode'), true)
+  const embTable = store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='embeddings'").get()
+  assert.equal(embTable?.name, 'embeddings')
   assert.equal(store.getMessageByAnchor('chat://2026-11-20#s1#1').text, 'v1 历史消息保留校验')
 
   store.setMeta('test:key', { ok: true, count: 3 }, 1234)

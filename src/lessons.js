@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
-import { computeContentHash, detectSecret } from './guard.js'
+import { computeContentHash, detectPromptInjection, detectSecret } from './guard.js'
 import { formatProfileMeta, parseMetaParts } from './profile.js'
 import {
   atomicWriteFile,
@@ -33,6 +33,7 @@ function splitTermList(raw) {
 export function parseLessonMarkdown(raw, slug) {
   const lines = String(raw ?? '').split(/\r?\n/)
   let name = slug
+  let status = 'active'
   let tags = []
   let triggers = []
   const entries = []
@@ -50,6 +51,11 @@ export function parseLessonMarkdown(raw, slug) {
       continue
     }
     if (!inEntries) {
+      const statusMatch = /^[-*]\s*status:\s*(.+?)\s*$/i.exec(line)
+      if (statusMatch) {
+        status = statusMatch[1].trim().toLowerCase() === 'archived' ? 'archived' : 'active'
+        continue
+      }
       const tagsMatch = /^[-*]\s*tags:\s*(.+?)\s*$/i.exec(line)
       if (tagsMatch) {
         tags = splitTermList(tagsMatch[1])
@@ -85,6 +91,7 @@ export function parseLessonMarkdown(raw, slug) {
   return {
     slug,
     name,
+    status,
     tags,
     triggers,
     entries,
@@ -93,9 +100,11 @@ export function parseLessonMarkdown(raw, slug) {
 }
 
 export function serializeLessonMarkdown(lesson) {
+  const status = lesson.status === 'archived' ? 'archived' : 'active'
   const lines = [
     `# ${lesson.name}`,
     '',
+    `- status: ${status}`,
     `- tags: ${(lesson.tags ?? []).join(', ')}`,
     `- triggers: ${(lesson.triggers ?? []).join(', ')}`,
     '',
@@ -179,7 +188,19 @@ export async function upsertLesson(home, options) {
       return {
         ok: false,
         reason: secret.code,
+        kind: secret.kind,
         message: secret.message,
+      }
+    }
+    if (options?.blockPromptInjection !== false) {
+      const inj = detectPromptInjection(`${rawName}\n${rawContent}`)
+      if (inj.detected) {
+        return {
+          ok: false,
+          reason: inj.code,
+          kind: inj.kind,
+          message: inj.message,
+        }
       }
     }
   }
@@ -193,7 +214,11 @@ export async function upsertLesson(home, options) {
       triggers: [...existing.triggers],
       entries: [...existing.entries],
     }
-    : { slug, name: rawName, tags: [], triggers: [], entries: [] }
+    : { slug, name: rawName, status: 'active', tags: [], triggers: [], entries: [] }
+
+  if (options?.status === 'active' || options?.status === 'archived') {
+    lesson.status = options.status
+  }
 
   if (Array.isArray(options?.tags)) {
     lesson.tags = mergeUniqueTerms(lesson.tags, options.tags)
@@ -294,6 +319,7 @@ export function matchLessonsInText(home, text, { tags = [] } = {}) {
   const matched = []
 
   for (const lesson of lessons) {
+    if (lesson.status === 'archived') continue
     let bestIndex = -1
     let bestTrigger
     if (hasText) {
@@ -401,7 +427,7 @@ export function searchLessons(home, { query = '', limit = 10 } = {}) {
         source: entry.source || '',
         added: entry.added || '',
       })),
-      ...extractExtraCardLines(lesson.raw, '避坑条目', /^[-*]\s*(?:tags|triggers):/i).map(line => ({
+      ...extractExtraCardLines(lesson.raw, '避坑条目', /^[-*]\s*(?:status|tags|triggers):/i).map(line => ({
         content: line,
       })),
     ],

@@ -1,15 +1,17 @@
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { createBufferApi } from '../src/buffer.js'
 import { normalizeConfig } from '../src/config.js'
 import { createContextApi } from '../src/context.js'
 import * as entityApi from '../src/entities.js'
 import * as journalApi from '../src/journal.js'
+import * as lessonApi from '../src/lessons.js'
 import * as profileApi from '../src/profile.js'
 import { createMemoryStore } from '../src/store.js'
 import { estimateTokens } from '../src/util.js'
+import { createVectorApi, rrfMerge } from '../src/vector.js'
 
 const DEFAULT_DATASET_PATH = resolve(import.meta.dirname, 'dataset.json')
 
@@ -50,19 +52,29 @@ function extractSearchTerms(question) {
   return terms.slice(0, 10).join(' ')
 }
 
-function buildDshMemoryContextForCase(env, item) {
+function buildDshMemoryContextForCase(env, item, { useVector = false } = {}) {
+  const t0 = performance.now()
   const frozen = env.contextApi.sectionFor('eval-session')
   const matchedEntities = entityApi.matchEntitiesInText(env.dir, item.question)
   const entityText = matchedEntities
     .map(m => entityApi.formatEntityCardForPrompt(m.entity))
+    .join('\n\n')
+  const matchedLessons = lessonApi.matchLessonsInText(env.dir, item.question)
+  const lessonText = matchedLessons
+    .map(m => lessonApi.formatLessonCardForPrompt(m.lesson))
     .join('\n\n')
 
   const terms = extractSearchTerms(item.question)
 
   const msgHits = terms ? env.store.searchMessages({ query: terms, limit: 3 }) : []
   const journalHits = terms ? journalApi.searchJournals(env.dir, { query: terms, limit: 3 }) : []
+  const entityBodyHits = terms ? entityApi.searchEntities(env.dir, { query: terms, limit: 2 }) : []
+  const lessonBodyHits = terms ? lessonApi.searchLessons(env.dir, { query: terms, limit: 2 }) : []
 
   const searchBlocks = []
+  for (const c of [...entityBodyHits, ...lessonBodyHits]) {
+    searchBlocks.push(`[Card ${c.kind}:${c.name}] ${c.snippet}`)
+  }
   for (const j of journalHits) {
     searchBlocks.push(`[Journal ${j.date}] ${j.line}`)
   }
@@ -72,9 +84,34 @@ function buildDshMemoryContextForCase(env, item) {
     searchBlocks.push(rows.map(r => `[${r.anchor}] (${r.role}) ${r.text}`).join('\n'))
   }
 
+  if (useVector && env.vectorApi) {
+    const vecHits = env.vectorApi.search({ query: item.question, limit: 3, autoSync: false })
+    const ftsKeys = [
+      ...entityBodyHits.map(h => ({ key: `entity:${h.slug}`, snippet: h.snippet, sourceChannel: 'card' })),
+      ...lessonBodyHits.map(h => ({ key: `lesson:${h.slug}`, snippet: h.snippet, sourceChannel: 'card' })),
+      ...journalHits.map(h => ({ key: `journal:${h.date}`, snippet: h.line, sourceChannel: 'journal' })),
+      ...msgHits.map(h => ({ key: `msg:${h.anchor}`, snippet: h.text, sourceChannel: 'fts5' })),
+    ]
+    const fused = rrfMerge([
+      ftsKeys,
+      vecHits.map(vh => ({
+        key: vh.docKey,
+        snippet: vh.snippet,
+        vectorScore: vh.score,
+        sourceChannel: 'vector',
+      })),
+    ], { k: env.config.retrieval.vector.rrfK, limit: 4 })
+    for (const f of fused) {
+      if (f.sources.includes('vector')) {
+        searchBlocks.push(`[Vector+RRF ${f.key} score=${f.rrfScore.toFixed(4)}] ${f.snippet}`)
+      }
+    }
+  }
+
   return {
     frozenPrompt: frozen,
-    dynamicContext: [entityText, searchBlocks.join('\n')].filter(Boolean).join('\n\n'),
+    dynamicContext: [entityText, lessonText, searchBlocks.join('\n')].filter(Boolean).join('\n\n'),
+    latencyMs: performance.now() - t0,
   }
 }
 
@@ -113,6 +150,21 @@ async function seedDatasetIntoHome(dir, dataset) {
     }
   }
 
+  for (const lesson of dataset.lessons ?? []) {
+    for (const entry of lesson.entries ?? []) {
+      await lessonApi.upsertLesson(dir, {
+        name: lesson.name,
+        tags: lesson.tags ?? [],
+        triggers: lesson.triggers ?? [],
+        op: 'add',
+        content: entry.content,
+        added: entry.added,
+        source: entry.source,
+        pinned: entry.pinned === true,
+      })
+    }
+  }
+
   for (const jr of dataset.journals ?? []) {
     await journalApi.writeJournalAtomic(dir, jr.date, jr.markdown)
   }
@@ -130,7 +182,18 @@ async function seedDatasetIntoHome(dir, dataset) {
     })
   }
 
-  const bufferApi = createBufferApi({ home: dir, profileApi, clock })
+  const bufferApi = createBufferApi({ home: dir, config, profileApi, lessonApi, clock })
+  const vectorApi = createVectorApi({
+    config,
+    store,
+    journalApi,
+    entityApi,
+    lessonApi,
+    profileApi,
+    clock,
+  })
+  vectorApi.syncIndex({ scope: 'default' })
+
   const contextApi = createContextApi({
     ctx: { effect() {}, on() {}, systemPrompt: { section() {} } },
     config,
@@ -139,10 +202,12 @@ async function seedDatasetIntoHome(dir, dataset) {
     journalApi,
     bufferApi,
     entityApi,
+    lessonApi,
+    vectorApi,
     clock,
   })
 
-  return { dir, config, store, bufferApi, contextApi }
+  return { dir, config, store, bufferApi, vectorApi, contextApi }
 }
 
 async function callOpenAiCompatible({ baseUrl, apiKey, model, system, prompt }) {
@@ -240,10 +305,35 @@ export async function runAblationEval({
       }
     })
 
+    // Offline retrieval ablation: FTS5-only vs FTS5 + Local Float32Array Vector (RRF)
+    const ftsScores = []
+    const ftsLatencies = []
+    const rrfScores = []
+    const rrfLatencies = []
+    for (const item of dataset.cases) {
+      const ftsCtx = buildDshMemoryContextForCase(env, item, { useVector: false })
+      ftsScores.push(scoreAnswer(`${ftsCtx.frozenPrompt}\n${ftsCtx.dynamicContext}`, item.expectedFacts))
+      ftsLatencies.push(ftsCtx.latencyMs)
+
+      const rrfCtx = buildDshMemoryContextForCase(env, item, { useVector: true })
+      rrfScores.push(scoreAnswer(`${rrfCtx.frozenPrompt}\n${rrfCtx.dynamicContext}`, item.expectedFacts))
+      rrfLatencies.push(rrfCtx.latencyMs)
+    }
+
     return {
       dryRun,
       caseCount: dataset.cases.length,
       summary,
+      retrievalAblation: {
+        ftsOnly: {
+          accuracy: Number((avg(ftsScores) * 100).toFixed(1)),
+          avgLatencyMs: Number(avg(ftsLatencies).toFixed(2)),
+        },
+        hybridRrf: {
+          accuracy: Number((avg(rrfScores) * 100).toFixed(1)),
+          avgLatencyMs: Number(avg(rrfLatencies).toFixed(2)),
+        },
+      },
     }
   } finally {
     try { env?.store?.close() } catch {}
@@ -274,4 +364,19 @@ if (isDirectCliRun()) {
     'Cached Prefix Tokens': row.avgCachedPrefixTokens,
     'Effective Cost Tokens': row.effectiveUncachedTokens,
   })))
+  if (report.retrievalAblation) {
+    console.log('Retrieval ablation (FTS5+Keyword only vs FTS5+Local Vector RRF):')
+    console.table([
+      {
+        Mode: 'fts-only (default)',
+        'Recall (%)': report.retrievalAblation.ftsOnly.accuracy,
+        'Avg Latency (ms)': report.retrievalAblation.ftsOnly.avgLatencyMs,
+      },
+      {
+        Mode: 'fts+vector (RRF)',
+        'Recall (%)': report.retrievalAblation.hybridRrf.accuracy,
+        'Avg Latency (ms)': report.retrievalAblation.hybridRrf.avgLatencyMs,
+      },
+    ])
+  }
 }
