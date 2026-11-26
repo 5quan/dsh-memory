@@ -95,15 +95,12 @@ stateDiagram-v2
 1. **【指令冲突 · 🚧 进行中 `dsh-ctrl#12` / `PR #14`】两套原话检索工具在提示词里“左右互搏”**
    - **现状**：Layer 2（`ds-bot/src/host/prompt.js` 第 23 行）教模型“找早期原话细节调 `read_own_chat`（`[part 2 #1234]` 锚点）”；紧接着 Layer 3（`dsh-memory/src/context.js` `USAGE_GUIDANCE`）又教模型“查历史原话调 `memory_search` + `memory_read_context`（`chat://` 锚点）”。
    - **优化方案**：双插件联调时明确主次——**跨天/跨段搜个人对话统一走 `memory_search` + `memory_read_context`**，`read_own_chat` 仅降级用于查看旧 Part 的 `[Handoff]` 交接笔记或群聊上下文，避免模型选工具纠结。
-2. **【引导平铺 · ⏳ 待办 `dsh-memory#9`】`USAGE_GUIDANCE` 是“工具说明书”而非“决策路由表”**
-   - **现状**：`dsh-memory/src/context.js` 把 15 个工具按功能罗列了一遍，但没告诉模型**先后顺序**和**短词搜索技巧**。
-   - **优化方案**：将 `USAGE_GUIDANCE` 改写为 5 行紧凑的“按意图查表（先看前缀 ➔ 查人/坑先翻 Entity/Lesson ➔ 查日期走 History/Journal ➔ 查原话用短核心词 `memory_search` + `memory_read_context`）”。
-3. **【工具面过宽 · ⏳ 待办 `dsh-memory#9`】15 个记忆工具全量常驻主会话 Layer 1**
-   - **现状**：像 `memory_dream_now`、`memory_digest_now`、`memory_rollback`、`memory_onboarding` 这类低频运维/一次性工具每轮都占着 Chief 的工具 Schema 预算和注意力。
-   - **优化方案**：日常对话只向模型常驻暴露高频核心工具（检索 4 个 + 缓冲写入/确认 + 实体/避坑查看 + 遗忘），低频运维操作收口到设置面板或合并为单一管理入口。
-4. **【场景无区分 · ⏳ 待办 `dsh-memory#9`】闲聊与工作共享同一套冻结日报与卡片触发**
-   - **现状**：冻结前缀永远挂着近 7 天开发日报，聊生活话题时容易把模型带偏去提旧项目。
-   - **优化方案**：对应 `dsh-memory` Issue `#9` 第 2 项，引入 `work / chat` 模式与完结卡片 `status: archived` 静默归档，让上下文不仅“记得住”，还懂得“不合时宜时闭嘴”。
+2. **【引导平铺 · ✅ 已合入 `#9` / `PR #15`】`USAGE_GUIDANCE` 已改为“按意图决策路由表”**
+   - **已落地解法**：精简为紧凑“按意图选工具”路由（离线评测前缀缓存由 724 降至 607 tokens），同时明确 `tools.profile: 'full'` 运维兜底引导。
+3. **【工具面过宽 · ✅ 已合入 `#9` / `PR #15`】主会话 Layer 1 默认隐藏低频运维工具**
+   - **已落地解法**：新增 `.volatile()` `tools.profile`（默认 `'compact'`），通过 `ctx.tools.register(..., { when })` 在主会话隐藏 `memory_dream_now`、`memory_digest_now`、`memory_rollback` 及非空画像时的 `memory_onboarding`。
+4. **【场景分化 · ✅ 已合入 `#9` / `PR #15`】工作模式 / 聊天模式与 `status: archived` 防串台**
+   - **已落地解法**：`memory_mode_set` 支持 `scene: 'work' | 'chat'`（`chat` 模式下省略工作日报并静默实体/避坑/晨报自动增量），`entities/` 与 `lessons/` 支持 `status: archived` 退出自动召回。
 
 ### （二）代码级上下文与存储隐蔽盲区
 
@@ -129,5 +126,5 @@ stateDiagram-v2
 |---|---|---|---|
 | **第 5、6 项** | `subagent` 默认前缀隔离、只读工具边界、`memory_search` 卡片正文检索 | `5quan/dsh-memory` | ✅ 已合入（`#13` / PR `#14`） |
 | **第 1、5（白名单）、8（过期 GC）** | 检索提示词分工、Worker/Reviewer 工具白名单、Artifact 过期 GC | `5quan/dsh-ctrl` | 🚧 PR `#14` 待合入（`#12`） |
-| **第 2、3、4 项** | `USAGE_GUIDANCE` 路由精简、工具暴露收敛、`work/chat` 模式与 `archived` | `5quan/dsh-memory` | ⏳ 已登记在 Open Issue [`#9`](https://github.com/5quan/dsh-memory/issues/9) |
+| **第 2、3、4 项** | `USAGE_GUIDANCE` 路由精简、工具暴露收敛、`work/chat` 模式与 `archived` | `5quan/dsh-memory` | ✅ 已合入（`#9` / PR `#15`） |
 | **第 7 项、第 8 项（遗忘联动）** | 日内重型换 Part 实体/避坑卡预热、`memory_forget` 联动清理孤儿 `art-*.txt` | `5quan/dsh-ctrl` | 📋 已建 Issue [`#15`](https://github.com/5quan/dsh-ctrl/issues/15) |

@@ -15,6 +15,10 @@ import * as lessonApi from '../src/lessons.js'
 import * as profileApi from '../src/profile.js'
 import { createMemoryStore } from '../src/store.js'
 import { createLocalEmbedder, decodeFloat32, encodeFloat32, cosineSimilarity, rrfMerge } from '../src/vector.js'
+import { createBufferApi } from '../src/buffer.js'
+import { normalizeConfig } from '../src/config.js'
+import { createContextApi } from '../src/context.js'
+import * as journalApi from '../src/journal.js'
 
 function setupTestHarness({ dir, rawConfig = {}, clock, llmImpl }) {
   const root = new Context()
@@ -258,6 +262,67 @@ test('snapshotRefreshIdleMinutes refreshes only when BOTH idle threshold exceede
   const snapRefreshed = rt.contextApi.sectionFor('s-fp')
   assert.equal(snapRefreshed.includes('盘中新增条目 B'), true)
   assert.equal(rt.contextApi.getSnapshotMeta('s-fp', '2026-11-26')?.refreshCount, 1)
+
+  // Verify USAGE_GUIDANCE contains tools.profile=full hint for compact mode
+  assert.equal(snapRefreshed.includes('tools.profile'), true)
+})
+
+test('context persists sliding lastSeenAt across restarts and uses PROFILE-specific overflow notice', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-memory-restart-'))
+  let nowMs = Date.parse('2026-11-26T10:00:00+08:00')
+  const clock = { now: () => nowMs }
+  const cfg = normalizeConfig({
+    home: dir,
+    timeZone: 'Asia/Shanghai',
+    snapshotRefreshIdleMinutes: 60,
+    sections: { profile: { maxTokens: 120 } },
+  })
+  const store = createMemoryStore(join(dir, 'archive.sqlite'))
+  const bufferApi = createBufferApi({ home: dir, config: cfg, profileApi, lessonApi, clock })
+
+  t.after(() => {
+    store.close()
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5 })
+  })
+
+  // Seed oversized PROFILE.md to verify section-specific overflow note (not memory_journal_read)
+  const bulkyLines = Array.from({ length: 20 }, (_, i) => `- 长期偏好测试第 ${i + 1} 条：保持严格代码审查与单测覆盖验证`).join('\n')
+  const { writeFileSync } = await import('node:fs')
+  writeFileSync(join(dir, 'PROFILE.md'), `# 核心画像（Profile）\n\n## 长期规矩与边界\n${bulkyLines}\n`, 'utf8')
+
+  const makeCtx = () => createContextApi({
+    ctx: { effect() {}, on() {}, systemPrompt: { section() {} } },
+    config: cfg,
+    store,
+    profileApi,
+    journalApi,
+    bufferApi,
+    entityApi,
+    lessonApi,
+    clock,
+  })
+
+  const ctx1 = makeCtx()
+  const snap1 = ctx1.sectionFor('s-restart')
+  assert.equal(snap1.includes('PROFILE.md 超出预算已省略末尾内容'), true)
+  assert.equal(snap1.includes('可调用 memory_journal_read 查看完整文件'), false)
+
+  // +40m active turn persists sliding lastSeenAt to SQLite (> 60s throttle)
+  nowMs += 40 * 60_000
+  assert.equal(ctx1.sectionFor('s-restart'), snap1)
+
+  // At +70m (30m after last active turn at +40m, < 60m threshold), mutate PROFILE and simulate restart via fresh contextApi
+  nowMs += 30 * 60_000
+  writeFileSync(join(dir, 'PROFILE.md'), `# 核心画像（Profile）\n\n## 长期规矩与边界\n- 重启期间新增规矩 ENTRY_Z\n${bulkyLines}\n`, 'utf8')
+  const ctx2 = makeCtx()
+  const snapAfterRestart = ctx2.sectionFor('s-restart')
+  assert.equal(snapAfterRestart, snap1)
+  assert.equal(snapAfterRestart.includes('ENTRY_Z'), false)
+
+  // +65m later (>= 60m idle since 11:10) with changed PROFILE -> now refreshes!
+  nowMs += 65 * 60_000
+  const snapAfterIdle = ctx2.sectionFor('s-restart')
+  assert.equal(snapAfterIdle.includes('ENTRY_Z'), true)
 })
 
 test('SQLite v3->v4 migration, local Float32Array vector BLOB + RRF hybrid search, and compact tool activation when()', async (t) => {
