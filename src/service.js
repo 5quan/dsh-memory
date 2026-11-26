@@ -15,6 +15,7 @@ export function createPublicService({
   lessonApi,
   briefingApi,
   onboardingApi,
+  vectorApi,
   clock = { now: () => Date.now() },
 }) {
   function getCurrentLogicalDate() {
@@ -226,6 +227,18 @@ export function createPublicService({
     return onboardingApi.reset(options)
   }
 
+  function getScene(sessionId) {
+    return store.getEffectiveScene?.(sessionId, config.defaultScene) ?? config.defaultScene ?? 'work'
+  }
+
+  function setScene(sessionId, scene) {
+    return store.setSessionScene(sessionId, scene, clock.now())
+  }
+
+  function reindexVectors(options = {}) {
+    return vectorApi ? vectorApi.reindexAll(options) : { total: 0, updated: 0, removed: 0 }
+  }
+
   return Object.freeze({
     contractVersion: 1,
     serviceName: SERVICE_NAME,
@@ -246,6 +259,9 @@ export function createPublicService({
     submitOnboarding,
     skipOnboarding,
     resetOnboarding,
+    getScene,
+    setScene,
+    reindexVectors,
     getSettingsSnapshot: () => snapshotLiveConfig(config),
   })
 }

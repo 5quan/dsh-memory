@@ -80,9 +80,9 @@ test('offline regression benchmark: correction P/R, secret guard FP/recall, row-
   assert.equal(profileApi.readProfile(dir).includes('SecretTagA'), false)
   assert.equal(profileApi.readProfile(dir).includes('保留手动条目'), true)
 
-  // 5. 3-way ablation benchmark dry-run verification
+  // 5. 3-way ablation + FTS5-vs-RRF retrieval ablation dry-run verification
   const report = await runAblationEval({ dryRun: true })
-  assert.equal(report.caseCount, 8)
+  assert.equal(report.caseCount >= 10, true)
   const noMem = report.summary.find(s => s.arm === 'no-memory')
   const dshMem = report.summary.find(s => s.arm === 'dsh-memory')
   const goldMem = report.summary.find(s => s.arm === 'gold-memory')
@@ -90,4 +90,7 @@ test('offline regression benchmark: correction P/R, secret guard FP/recall, row-
   assert.equal(dshMem.accuracy >= 85, true, `Expected >= 85% offline context recall, got ${dshMem.accuracy}%`)
   assert.equal(goldMem.accuracy, 100)
   assert.equal(dshMem.avgCachedPrefixTokens > 0, true)
+  assert.ok(report.retrievalAblation)
+  assert.equal(report.retrievalAblation.hybridRrf.accuracy > report.retrievalAblation.ftsOnly.accuracy, true)
+  assert.equal(report.retrievalAblation.hybridRrf.accuracy, 100)
 })

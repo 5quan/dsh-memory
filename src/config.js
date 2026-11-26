@@ -3,6 +3,8 @@ import { join, resolve } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 
 export const VALID_MEMORY_MODES = new Set(['full', 'read-only', 'off'])
+export const VALID_SCENE_MODES = new Set(['work', 'chat'])
+export const VALID_TOOL_PROFILES = new Set(['compact', 'full'])
 export const VALID_SUBAGENT_POLICIES = new Set(['user-only', 'ignore', 'all'])
 
 const VOLATILE_WRITE_SYM = Symbol.for('cosmokit.volatile.write')
@@ -16,8 +18,13 @@ export const Config = z.object({
     z.const('read-only').description('只读模式（不写入新记忆）'),
     z.const('off').description('完全关闭（无痕模式）'),
   ]).default('full').volatile().description('新会话默认记忆模式'),
+  defaultScene: z.union([
+    z.const('work').description('工作模式（注入日报与工作实体/避坑增量）'),
+    z.const('chat').description('聊天模式（仅注入跨场景画像并静默工作增量）'),
+  ]).default('work').volatile().description('新会话默认记忆场景模式'),
   dayStartHour: z.number().step(1).min(0).max(23).default(2).volatile().description('逻辑日边界小时（0-23，默认凌晨 02:00 之前算前一天）'),
   idleMinutes: z.number().min(1).default(30).volatile().description('自动触发昨日日结所需的连续空闲分钟数'),
+  snapshotRefreshIdleMinutes: z.number().step(5).min(0).default(60).volatile().description('冻结前缀闲置指纹刷新阈值（分钟；0 表示同日永不重拍，>0 时仅在闲置超阈值且内容哈希变化时重拍）'),
   ingest: z.object({
     subagentPolicy: z.union(['user-only', 'ignore', 'all']).default('user-only').description('子代理会话采集策略'),
     injectSubagentContext: z.boolean().default(false).volatile().description('是否为 subagent 子代理会话注入冻结前缀与动态记忆增量（默认关闭，仅保留按需工具查询与用户纠偏采集）'),
@@ -32,7 +39,27 @@ export const Config = z.object({
   }).description('初始画像冷启动引导'),
   briefing: z.object({
     enabled: z.boolean().default(true).volatile().description('是否在每日首次正常交互时推送晨报与待确认缓冲清单'),
+    maxItemsPerBriefing: z.number().step(1).min(1).default(8).volatile().description('单次晨报最多展示的待确认条目数量'),
+    minPendingToPrompt: z.number().step(1).min(0).default(1).volatile().description('附带人工审批交互提示所需的最小待确认条目数'),
+    cooldownDays: z.number().step(1).min(1).default(1).volatile().description('晨报推送最小间隔天数（1=每日一次）'),
   }).description('每日记忆晨报'),
+  tools: z.object({
+    profile: z.union([
+      z.const('compact').description('精简模式（主会话隐藏低频运维工具，降低工具面冗余）'),
+      z.const('full').description('完整模式（全部 15 个工具始终暴露）'),
+    ]).default('compact').volatile().description('主会话工具面暴露档位'),
+  }).description('记忆工具暴露面治理'),
+  retrieval: z.object({
+    vector: z.object({
+      enabled: z.boolean().default(false).volatile().description('是否启用本地 Float32Array BLOB 向量检索 + RRF 混合重排（默认关闭，零外部向量库）'),
+      dimensions: z.number().step(32).min(32).max(1024).default(128).volatile().description('本地哈希向量维度'),
+      rrfK: z.number().step(1).min(1).default(60).volatile().description('RRF 混合重排平滑常数 k'),
+      minScore: z.number().min(0).max(1).step(0.02).default(0.12).volatile().description('向量余弦相似度最低命中阈值'),
+    }).description('可选本地向量检索层（archive.sqlite embeddings）'),
+  }).description('历史记忆检索策略'),
+  guard: z.object({
+    blockPromptInjection: z.boolean().default(true).volatile().description('写入侧是否拦截高置信度提示词注入 / 记忆投毒载荷'),
+  }).description('写入侧安全拦截'),
   correction: z.object({
     autoCapture: z.boolean().default(true).volatile().description('是否启用轻量规则自动捕获用户纠偏写入当日缓冲区'),
     defaultSection: z.string().default('长期规矩与边界').volatile().description('自动捕获纠偏条目的默认 PROFILE.md 分节'),
@@ -195,6 +222,10 @@ export function normalizeConfig(raw = {}) {
   const rawBuffer = unwrap(src.buffer) ?? {}
   const rawOnboarding = unwrap(src.onboarding) ?? {}
   const rawBriefing = unwrap(src.briefing) ?? {}
+  const rawTools = unwrap(src.tools) ?? {}
+  const rawRetrieval = unwrap(src.retrieval) ?? {}
+  const rawVector = unwrap(rawRetrieval.vector) ?? {}
+  const rawGuard = unwrap(src.guard) ?? {}
   const rawCorrection = unwrap(src.correction) ?? {}
   const rawDream = unwrap(src.dream) ?? {}
   const rawLlm = unwrap(src.llm) ?? {}
@@ -224,14 +255,21 @@ export function normalizeConfig(raw = {}) {
     buffer: {},
     onboarding: {},
     briefing: {},
+    tools: {},
+    retrieval: { vector: {} },
+    guard: {},
     correction: {},
     dream: {},
     llm: {},
   }
 
   defineLiveField(config, 'defaultMode', src.defaultMode, v => (VALID_MEMORY_MODES.has(v) ? v : 'full'))
+  defineLiveField(config, 'defaultScene', src.defaultScene, v => (VALID_SCENE_MODES.has(v) ? v : 'work'))
   defineLiveField(config, 'dayStartHour', src.dayStartHour, v => nonNegativeHour(v, 2))
   defineLiveField(config, 'idleMinutes', src.idleMinutes, v => positiveNumber(v, 30))
+  defineLiveField(config, 'snapshotRefreshIdleMinutes', src.snapshotRefreshIdleMinutes, v => (
+    typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 60
+  ))
   defineLiveField(config.ingest, 'injectSubagentContext', ingestObj.injectSubagentContext, v => boolOr(v, false))
 
   defineLiveField(config.buffer, 'autoCommitSources', rawBuffer.autoCommitSources, v => stringList(v, ['explicit']))
@@ -239,6 +277,23 @@ export function normalizeConfig(raw = {}) {
 
   defineLiveField(config.onboarding, 'enabled', rawOnboarding.enabled, v => boolOr(v, true))
   defineLiveField(config.briefing, 'enabled', rawBriefing.enabled, v => boolOr(v, true))
+  defineLiveField(config.briefing, 'maxItemsPerBriefing', rawBriefing.maxItemsPerBriefing, v => positiveInt(v, 8))
+  defineLiveField(config.briefing, 'minPendingToPrompt', rawBriefing.minPendingToPrompt, v => nonNegativeInt(v, 1))
+  defineLiveField(config.briefing, 'cooldownDays', rawBriefing.cooldownDays, v => positiveInt(v, 1))
+
+  defineLiveField(config.tools, 'profile', rawTools.profile, v => (VALID_TOOL_PROFILES.has(v) ? v : 'compact'))
+
+  defineLiveField(config.retrieval.vector, 'enabled', rawVector.enabled, v => boolOr(v, false))
+  defineLiveField(config.retrieval.vector, 'dimensions', rawVector.dimensions, v => {
+    const n = positiveInt(v, 128)
+    return Math.min(Math.max(n, 32), 1024)
+  })
+  defineLiveField(config.retrieval.vector, 'rrfK', rawVector.rrfK, v => positiveInt(v, 60))
+  defineLiveField(config.retrieval.vector, 'minScore', rawVector.minScore, v => (
+    typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1 ? v : 0.12
+  ))
+
+  defineLiveField(config.guard, 'blockPromptInjection', rawGuard.blockPromptInjection, v => boolOr(v, true))
 
   defineLiveField(config.correction, 'autoCapture', rawCorrection.autoCapture, v => boolOr(v, true))
   defineLiveField(config.correction, 'defaultSection', rawCorrection.defaultSection, v => stringOr(v, '长期规矩与边界'))
@@ -267,14 +322,35 @@ export function snapshotLiveConfig(config) {
     home: config.home,
     timeZone: config.timeZone,
     defaultMode: config.defaultMode,
+    defaultScene: config.defaultScene,
     dayStartHour: config.dayStartHour,
     idleMinutes: config.idleMinutes,
+    snapshotRefreshIdleMinutes: config.snapshotRefreshIdleMinutes,
     ingest: {
       subagentPolicy: config.ingest.subagentPolicy,
       injectSubagentContext: config.ingest.injectSubagentContext,
     },
     onboarding: { enabled: config.onboarding.enabled },
-    briefing: { enabled: config.briefing.enabled },
+    briefing: {
+      enabled: config.briefing.enabled,
+      maxItemsPerBriefing: config.briefing.maxItemsPerBriefing,
+      minPendingToPrompt: config.briefing.minPendingToPrompt,
+      cooldownDays: config.briefing.cooldownDays,
+    },
+    tools: {
+      profile: config.tools.profile,
+    },
+    retrieval: {
+      vector: {
+        enabled: config.retrieval.vector.enabled,
+        dimensions: config.retrieval.vector.dimensions,
+        rrfK: config.retrieval.vector.rrfK,
+        minScore: config.retrieval.vector.minScore,
+      },
+    },
+    guard: {
+      blockPromptInjection: config.guard.blockPromptInjection,
+    },
     correction: {
       autoCapture: config.correction.autoCapture,
       defaultSection: config.correction.defaultSection,

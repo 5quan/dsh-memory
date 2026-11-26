@@ -25,7 +25,7 @@
 | **M5** | ✅ 已完成 | 避坑经验与程序性记忆（`lessons/*.md`、`target: 'lesson:<名称>'`、标签/触发词动态召回、`memory_lesson_manage`，`dshMemory` 新增 `matchLessons`/`getLesson`/`listLessons` 供外层及原版 DSH 复用；可执行技能留在执行层） |
 | **M5.5** | ✅ 已完成 | DSH 原生 `.volatile()` 实时设置开关（`export const Config` 自动投影设置页）、`dream.useLlm` 分级默认关闭策略（`false`）、`dshMemory.getSettingsSnapshot()` 与本使用说明书 |
 | **`#13`** | ✅ 已完成 | `origin === 'subagent'` 默认隔离（`ingest.injectSubagentContext: false` 跳过冻结前缀快照与增量，保留 `user-only` 人类消息与纠偏采集）、15 个 `memory_*` 工具 `subagent` 只读执行边界，以及 `memory_search` 补齐 `entities/*.md` / `lessons/*.md` 正文检索（`### Card Matches`） |
-| **后续规划（Issue `#9`）** | 📝 已记录 | 全系统流程与提示词审查优化（修复 Dream 日报截断 + 借鉴 Anthropic Dreaming/Knowledge Wiki + 精简检索引导）、工作/聊天模式分化与防无关项目串台（差异化提示词 + `archived` 静默）、冻结前缀闲置指纹刷新、可选本地 SQLite 向量+RRF 混合检索、写入侧投毒拦截与红队验收 |
+| **`#9`** | ✅ 已完成 | 全系统流程与 Digest/Dream/`USAGE_GUIDANCE` 提示词调优（修复 `condenseJournalForDream` 日报尾部截断 + Knowledge Wiki/Analyzer-Organizer）、`tools.profile: compact` 主会话低频工具收敛与晨报防打扰治理、`work`/`chat` 场景模式 + `status: archived` 防串台、`snapshotRefreshIdleMinutes` 闲置指纹刷新、可选本地 `Float32Array` BLOB 向量 + RRF 混合重排（默认关闭）以及写入侧提示注入防护（`INJECTION_DETECTED`） |
 
 ---
 
@@ -41,7 +41,7 @@
 ├── entities/<slug>.md           # [主存储] 人/项目/服务器实体档案卡（别名触发动态注入）
 ├── lessons/<slug>.md            # [主存储] 避坑经验/操作雷区卡（触发词+标签动态注入）
 ├── retired.jsonl                # [主存储] PROFILE.md 非遗忘替换/淘汰备份（支撑 memory_rollback）
-├── archive.sqlite               # [主存储+派生] messages 原文主表 + FTS5 trigram + 会话/切日/元信息表 (v3)
+├── archive.sqlite               # [主存储+派生] messages 原文主表 + FTS5 trigram + 会话/切日/embeddings 派生表 (v4)
 ├── history/                     # [派生] OpenViking L0 (.abstract.md) 与月度 L1 (.overview.md)
 └── snapshots/                   # [派生] 按 (session_id, logical_date) 冻结的 System Prompt 快照
 ```
@@ -141,17 +141,17 @@
 | **M1** | `memory_journal_read` | 按日期读取完整日报，或列出所有已有日报日期 | `date?` |
 | **M1** | `memory_buffer_add` | 向当日缓冲区写入记忆/纠偏/实体事实/避坑经验（自动绑定锚点 + 凭据与去重守卫） | `content`, `sourceType`, `target?`, `section?`, `tags?`, `triggers?`, `op?`, `supersedesId?`, `expires?`, `pinned?` |
 | **M1** | `memory_buffer_manage` | 查看、批量 `approve` / `reject` 缓冲区条目，支持 `settleNow: true` | `action`, `ids?`, `date?`, `reason?`, `settleNow?` |
-| **M1** | `memory_mode_set` | 切换会话或全局无痕模式 | `mode` (`full`/`read-only`/`off`), `scope?` (`session`/`global`) |
+| **M1** | `memory_mode_set` | 切换会话或全局无痕模式 / 工作与聊天场景模式 | `mode?` (`full`/`read-only`/`off`), `scene?` (`work`/`chat`), `scope?` (`session`/`global`) |
 | **M1** | `memory_digest_now` | 手动触发指定逻辑日（默认昨天）日结与缓冲区结算 | `date?`, `force?` |
 | **M1** | `memory_forget` | 跨 9 层主动遗忘并失效快照（默认保护 `pinned`） | `anchor?`, `date?`, `keyword?`, `sessionId?`, `force?` |
 | **M2** | `memory_history_browse` | 浏览跨月 L0/L1 索引或单跳重建，下钻 L2 日报 | `action` (`list`/`read`/`rebuild`), `month?`, `level?` |
-| **M2** | `memory_entity_manage` | 列出、读取、增改或删除 `entities/` 实体卡及 `aliases` | `action`, `name?`, `type?`, `aliases?`, `content?`, `op?`, `supersedesId?`, `pinned?`, `force?` |
+| **M2** | `memory_entity_manage` | 列出、读取、增改或删除 `entities/` 实体档案卡、`aliases` 与 `status` 生命周期 | `action`, `name?`, `type?`, `status?` (`active`/`archived`), `aliases?`, `content?`, `op?`, `supersedesId?`, `pinned?`, `force?` |
 | **M3** | `memory_onboarding` | 查看冷启动状态、触发问卷、提交、跳过或重置初始画像 | `action` (`status`/`prompt`/`submit`/`skip`/`reset`), ... |
 | **M3** | `memory_briefing` | 拉取晨报摘要、批量/交互勾选确认或标记已送达 | `action` (`get`/`confirm`/`dismiss`), `approveIds?`, `rejectIds?`, `settleNow?`, `interactive?` |
 | **M4** | `memory_read_context` | 按 `chat://` 锚点行窗口展开前后 N 轮完整对话 | `anchor`, `before?`, `after?`, `maxCharsPerMessage?`, `maxTotalChars?` |
 | **M4** | `memory_dream_now` | 手动运行 Dream 规则/可选 LLM 整理提案（`dryRun` 可预览，失败不推水位） | `dryRun?`, `useLlm?`, `scope?` |
 | **M4** | `memory_rollback` | 基于 `retired.jsonl` 追加恢复被替换/淘汰的 `PROFILE.md` 条目 | `entryId` |
-| **M5** | `memory_lesson_manage` | 列出、读取、增改或删除 `lessons/` 避坑经验卡及 `tags`/`triggers` | `action`, `name?`, `tags?`, `triggers?`, `content?`, `op?`, `supersedesId?`, `pinned?`, `expires?`, `force?` |
+| **M5** | `memory_lesson_manage` | 列出、读取、增改或删除 `lessons/` 避坑经验卡、`tags`/`triggers` 与 `status` | `action`, `name?`, `status?` (`active`/`archived`), `tags?`, `triggers?`, `content?`, `op?`, `supersedesId?`, `pinned?`, `expires?`, `force?` |
 
 > **`subagent` 只读安全边界**：当调用会话的 `session.header.origin === 'subagent'` 时，仅放行只读检索操作（`memory_search`、`memory_read_context`、`memory_journal_read` 及 `memory_history_browse` / `memory_entity_manage` / `memory_lesson_manage` 的 `list`/`read`），拒绝一切写/删/全局运维调用（`memory_forget`、`memory_buffer_add`、`memory_buffer_manage`、`memory_mode_set`、`memory_digest_now`、`memory_onboarding`、`memory_briefing`、`memory_dream_now`、`memory_rollback` 及 `rebuild`/`upsert`/`delete`）。
 
@@ -166,11 +166,20 @@
 | 配置路径 | 默认值 | 实时热生效 | 说明 |
 |---|---|---|---|
 | `defaultMode` | `'full'` | `.volatile()` | 新会话默认记忆/无痕模式（`full` / `read-only` / `off`） |
+| `defaultScene` | `'work'` | `.volatile()` | 新会话默认场景模式（`work` 注入日报与工作卡片 / `chat` 仅保留跨场景画像） |
 | `dayStartHour` | `2` | `.volatile()` | 逻辑日边界小时（0–23） |
 | `idleMinutes` | `30` | `.volatile()` | 自动日结所需连续空闲分钟数 |
+| `snapshotRefreshIdleMinutes` | `60` | `.volatile()` | 冻结前缀闲置指纹刷新阈值（分钟，`0` 禁用；仅闲置超阈值且内容哈希变化时重拍） |
 | `ingest.injectSubagentContext` | `false` | `.volatile()` | 是否向 `origin === 'subagent'` 子会话注入冻结前缀与 `dsh-memory/delta`（默认关闭，不影响 `user-only` 采集） |
 | `onboarding.enabled` | `true` | `.volatile()` | 空画像冷启动引导开关 |
 | `briefing.enabled` | `true` | `.volatile()` | 每日首次正常交互晨报开关 |
+| `briefing.maxItemsPerBriefing` | `8` | `.volatile()` | 单次晨报最多展示的待确认条目数量（防审批疲劳） |
+| `briefing.minPendingToPrompt` | `1` | `.volatile()` | 附带人工确认引导所需的最小待确认条目数 |
+| `briefing.cooldownDays` | `1` | `.volatile()` | 晨报推送最小间隔天数 |
+| `tools.profile` | `'compact'` | `.volatile()` | 工具暴露档位（`compact` 主会话隐藏低频运维工具 / `full` 暴露全量 15 工具） |
+| `retrieval.vector.enabled` | `false` | `.volatile()` | 可选本地 `Float32Array` BLOB 向量 + RRF 混合重排检索（默认关闭） |
+| `retrieval.vector.dimensions` / `rrfK` / `minScore` | `128` / `60` / `0.12` | `.volatile()` | 本地哈希嵌入维度、RRF 平滑常数与余弦相似度门槛 |
+| `guard.blockPromptInjection` | `true` | `.volatile()` | 写入侧高置信度提示词注入 / 记忆投毒拦截开关 |
 | `correction.autoCapture` | `true` | `.volatile()` | 轻量规则自动捕获用户纠偏开关 |
 | `correction.defaultSection` | `'长期规矩与边界'` | `.volatile()` | 自动捕获纠偏默认写入分节 |
 | `dream.enabled` | `true` | `.volatile()` | 做梦后台整理总开关 |
@@ -218,12 +227,12 @@
   npm run eval:llm -- --dry-run   # 零费用离线回归
   npm run eval:llm                # 调用在线模型端到端消融（需主机配妥默认模型或 config.llm）
   ```
-- **后续专项梳理与演进方向（已登记于 [Issue #9](https://github.com/5quan/dsh-memory/issues/9) 与 [架构设计说明书 §3.9](docs/DESIGN.md)）**：
-  1. 全系统流程合理性专项审查与 Digest / Dream / `USAGE_GUIDANCE` 提示词调优（含修复 Dream 日报头部截断隐患）；
-  2. 无痕模式演进为**工作模式 / 聊天模式**（保留无痕兜底），针对性调整注入与提示词、抑制已完结或不相关项目主动串台（含 `archived` 静默归档）；
-  3. 冻结前缀按闲置时长 + 内容哈希指纹刷新机制（`snapshotRefreshIdleMinutes`）；
-  4. 可选本地 SQLite BLOB 向量 + RRF 混合重排派生检索（零外部向量库、默认关闭、由真实消融数据驱动）；
-  5. 写入侧记忆投毒 / 提示注入专项拦截与红队验收。
+- **全部演进方向已于 [Issue #9](https://github.com/5quan/dsh-memory/issues/9) 与 [架构设计说明书 §3.9](docs/DESIGN.md) 落地实现并完成消融/红队验证**：
+  1. 全系统流程梳理与 Digest / Dream / `USAGE_GUIDANCE` 提示词调优（含 `condenseJournalForDream` 修复头部截断、`tools.profile: compact` 与晨报打扰治理）；
+  2. 工作模式（`work`）/ 聊天模式（`chat`）与 `entities/`、`lessons/` `status: archived` 静默；
+  3. 冻结前缀按闲置时长 + 内容 SHA-256 指纹刷新（`snapshotRefreshIdleMinutes`）；
+  4. 可选本地 SQLite `Float32Array` BLOB 向量 + RRF 混合重排派生检索（`retrieval.vector.enabled`，零外部向量库、默认关闭）；
+  5. 写入侧记忆投毒 / 提示注入拦截与红队验收（`guard.blockPromptInjection`）。
 
 ## 延伸文档
 

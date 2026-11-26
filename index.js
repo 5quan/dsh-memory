@@ -16,6 +16,7 @@ import { createDreamApi } from './src/dream.js'
 import { createIngestApi } from './src/ingest.js'
 import { createContextApi } from './src/context.js'
 import { createToolsApi } from './src/tools.js'
+import { createVectorApi } from './src/vector.js'
 import { createPublicService, DAY_ROLLED_OVER_EVENT, SERVICE_NAME } from './src/service.js'
 
 export { DAY_ROLLED_OVER_EVENT, SERVICE_NAME }
@@ -33,7 +34,17 @@ export function createMemoryRuntime(ctx, rawConfig = {}, deps = {}) {
   const store = createMemoryStore(join(config.home, 'archive.sqlite'))
   ctx.effect(() => () => store.close(), 'dsh-memory: close archive.sqlite')
 
-  const bufferApi = createBufferApi({ home: config.home, profileApi, lessonApi, clock })
+  const bufferApi = createBufferApi({ home: config.home, config, profileApi, lessonApi, clock })
+  const vectorApi = createVectorApi({
+    config,
+    store,
+    journalApi,
+    entityApi,
+    lessonApi,
+    profileApi,
+    embedder: deps.embedder,
+    clock,
+  })
   const historyApi = createHistoryApi({
     ctx,
     config,
@@ -110,6 +121,7 @@ export function createMemoryRuntime(ctx, rawConfig = {}, deps = {}) {
     lessonApi,
     onboardingApi,
     briefingApi,
+    vectorApi,
     clock,
     warn,
   })
@@ -150,6 +162,7 @@ export function createMemoryRuntime(ctx, rawConfig = {}, deps = {}) {
     briefingApi,
     profileApi,
     dreamApi,
+    vectorApi,
     clock,
   })
   const publicService = createPublicService({
@@ -160,6 +173,7 @@ export function createMemoryRuntime(ctx, rawConfig = {}, deps = {}) {
     lessonApi,
     briefingApi,
     onboardingApi,
+    vectorApi,
     clock,
   })
 
@@ -203,6 +217,7 @@ export function createMemoryRuntime(ctx, rawConfig = {}, deps = {}) {
     ingestApi,
     contextApi,
     toolsApi,
+    vectorApi,
     service: publicService,
     whenReady: () => readyPromise,
   }

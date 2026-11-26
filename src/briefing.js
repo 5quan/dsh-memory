@@ -1,5 +1,5 @@
 import { parseJournalSections } from './journal.js'
-import { clipText, logicalDateOf } from './util.js'
+import { clipText, dateDiffDays, logicalDateOf } from './util.js'
 
 function metaKey(scope) {
   return `briefing:${scope}`
@@ -47,7 +47,7 @@ export function extractJournalHighlights(markdown, { maxPerSection = 3 } = {}) {
   }
 }
 
-function formatBriefingMarkdown({ date, yesterday, pending, approved }) {
+function formatBriefingMarkdown({ date, yesterday, pending, approved, maxPendingItems = 8 }) {
   const lines = [`# ${date} 每日记忆晨报`]
 
   if (yesterday) {
@@ -72,12 +72,18 @@ function formatBriefingMarkdown({ date, yesterday, pending, approved }) {
     lines.push('', '### 昨日日报亮点', '- （暂无历史日报）')
   }
 
+  const displayedPending = maxPendingItems > 0 ? pending.slice(0, maxPendingItems) : pending
+  const omittedPending = pending.length - displayedPending.length
+
   lines.push('', `### 待确认记忆缓冲区（待确认 ${pending.length} 条 / 已批准待落盘 ${approved.length} 条）`)
   if (pending.length === 0 && approved.length === 0) {
     lines.push('- （当前无待处理缓冲条目）')
   } else {
-    for (const item of pending) {
+    for (const item of displayedPending) {
       lines.push(`- [待确认] \`${item.id}\` (${item.logical_date} · ${item.source_type} -> ${item.target}) ${item.content}`)
+    }
+    if (omittedPending > 0) {
+      lines.push(`- … 其余 ${omittedPending} 条待确认项可通过 \`memory_buffer_manage({ action: "list" })\` 查看`)
     }
     for (const item of approved) {
       lines.push(`- [已批准待落盘] \`${item.id}\` (${item.logical_date} · ${item.source_type} -> ${item.target}) ${item.content}`)
@@ -128,9 +134,20 @@ export function createBriefingApi({
     const approved = active.filter(item => item.status === 'approved')
 
     const meta = store.getMeta(metaKey(scope))
-    const alreadyDelivered = meta?.lastBriefedDate === todayDate
+    const cooldownDays = config.briefing?.cooldownDays ?? 1
+    const alreadyDelivered = Boolean(
+      meta?.lastBriefedDate
+      && (meta.lastBriefedDate === todayDate || dateDiffDays(meta.lastBriefedDate, todayDate) < cooldownDays),
+    )
+    const maxPendingItems = config.briefing?.maxItemsPerBriefing ?? 8
     const hasContent = Boolean((yesterday && yesterday.highlights.hasContent) || pending.length > 0 || approved.length > 0)
-    const markdown = formatBriefingMarkdown({ date: todayDate, yesterday, pending, approved })
+    const markdown = formatBriefingMarkdown({
+      date: todayDate,
+      yesterday,
+      pending,
+      approved,
+      maxPendingItems,
+    })
 
     return {
       date: todayDate,
@@ -179,8 +196,9 @@ export function createBriefingApi({
       briefing.markdown,
     ]
 
-    if (briefing.buffer.totalPending > 0) {
-      let confirmHint = '请向用户展示待确认条目编号与内容供其勾选批准（approve）或驳回（reject），随后调用 `memory_briefing`（`action: "confirm"`）批量提交；若用户明确要求立刻写入画像，可传 `settleNow: true`。'
+    const minPendingToPrompt = config.briefing?.minPendingToPrompt ?? 1
+    if (briefing.buffer.totalPending > 0 && briefing.buffer.totalPending >= minPendingToPrompt) {
+      let confirmHint = '请向用户简明展示待确认条目编号与内容供一键批量批准（approve）或驳回（reject），随后调用 `memory_briefing`（`action: "confirm"`）提交；默认仅批准标记待日结写入以保缓存，若要求立刻生效可传 `settleNow: true`。'
       if (uiMode === 'show_view') {
         confirmHint = '可用 `show_view` 展示昨日亮点与待确认条目勾选卡片（或用 `ask_user` 询问），收到提交后调用 `memory_briefing`（`action: "confirm"`）批量 `approve`/`reject`（可选 `settleNow: true` 立即落盘）。'
       } else if (uiMode === 'ask_user') {

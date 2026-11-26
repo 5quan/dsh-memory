@@ -3,7 +3,7 @@ import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { parseAnchor } from './util.js'
 
-const SCHEMA_VERSION = 3
+const SCHEMA_VERSION = 4
 
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS messages (
@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS session_state (
   scope TEXT NOT NULL DEFAULT 'default',
   parent_session_id TEXT,
   memory_mode TEXT NOT NULL DEFAULT 'full',
+  scene_mode TEXT,
   last_seq INTEGER NOT NULL DEFAULT -1,
   replace_generation INTEGER NOT NULL DEFAULT 0,
   buffer_cursor TEXT,
@@ -64,6 +65,21 @@ CREATE TABLE IF NOT EXISTS session_state (
   injected_lessons TEXT NOT NULL DEFAULT '[]',
   updated_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS embeddings (
+  doc_key TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  scope TEXT NOT NULL DEFAULT 'default',
+  logical_date TEXT,
+  title TEXT,
+  snippet TEXT,
+  text_hash TEXT NOT NULL,
+  dims INTEGER NOT NULL,
+  vector BLOB NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_embeddings_kind_date ON embeddings(kind, logical_date);
 
 CREATE TABLE IF NOT EXISTS rollover_state (
   logical_date TEXT NOT NULL,
@@ -100,6 +116,7 @@ function normalizeSessionRow(row) {
     scope: row.scope,
     parentSessionId: row.parent_session_id,
     memoryMode: row.memory_mode,
+    sceneMode: row.scene_mode ?? null,
     lastSeq: row.last_seq,
     replaceGeneration: row.replace_generation,
     bufferCursor: row.buffer_cursor ?? null,
@@ -123,6 +140,9 @@ export function createMemoryStore(dbPath) {
     const sessionCols = new Set(db.prepare("PRAGMA table_info('session_state')").all().map(col => col.name))
     if (!sessionCols.has('injected_lessons')) {
       db.exec("ALTER TABLE session_state ADD COLUMN injected_lessons TEXT NOT NULL DEFAULT '[]';")
+    }
+    if (!sessionCols.has('scene_mode')) {
+      db.exec('ALTER TABLE session_state ADD COLUMN scene_mode TEXT;')
     }
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION};`)
   }
@@ -173,6 +193,7 @@ export function createMemoryStore(dbPath) {
       updated_at = excluded.updated_at
   `)
   const stmtDeleteMeta = db.prepare('DELETE FROM memory_meta WHERE key = ?')
+  const stmtDeleteMetaPrefix = db.prepare("DELETE FROM memory_meta WHERE key LIKE ? ESCAPE '\\'")
   const stmtListDates = db.prepare(`
     SELECT DISTINCT logical_date FROM messages
     WHERE scope = ?
@@ -181,12 +202,13 @@ export function createMemoryStore(dbPath) {
   const stmtGetSession = db.prepare('SELECT * FROM session_state WHERE session_id = ?')
   const stmtUpsertSession = db.prepare(`
     INSERT INTO session_state
-      (session_id, scope, parent_session_id, memory_mode, last_seq, replace_generation, buffer_cursor, injected_entities, injected_lessons, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (session_id, scope, parent_session_id, memory_mode, scene_mode, last_seq, replace_generation, buffer_cursor, injected_entities, injected_lessons, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(session_id) DO UPDATE SET
       scope = excluded.scope,
       parent_session_id = excluded.parent_session_id,
       memory_mode = excluded.memory_mode,
+      scene_mode = excluded.scene_mode,
       last_seq = excluded.last_seq,
       replace_generation = excluded.replace_generation,
       buffer_cursor = excluded.buffer_cursor,
@@ -194,6 +216,22 @@ export function createMemoryStore(dbPath) {
       injected_lessons = excluded.injected_lessons,
       updated_at = excluded.updated_at
   `)
+  const stmtUpsertEmbedding = db.prepare(`
+    INSERT INTO embeddings (doc_key, kind, scope, logical_date, title, snippet, text_hash, dims, vector, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(doc_key) DO UPDATE SET
+      kind = excluded.kind,
+      scope = excluded.scope,
+      logical_date = excluded.logical_date,
+      title = excluded.title,
+      snippet = excluded.snippet,
+      text_hash = excluded.text_hash,
+      dims = excluded.dims,
+      vector = excluded.vector,
+      updated_at = excluded.updated_at
+  `)
+  const stmtDeleteEmbedding = db.prepare('DELETE FROM embeddings WHERE doc_key = ?')
+  const stmtClearEmbeddings = db.prepare('DELETE FROM embeddings')
   const stmtGetRollover = db.prepare('SELECT * FROM rollover_state WHERE logical_date = ? AND scope = ?')
   const stmtUpsertRollover = db.prepare(`
     INSERT INTO rollover_state (logical_date, scope, status, attempts, error, completed_at)
@@ -310,6 +348,11 @@ export function createMemoryStore(dbPath) {
 
   function deleteMeta(key) {
     return stmtDeleteMeta.run(String(key)).changes > 0
+  }
+
+  function deleteMetaByPrefix(prefix) {
+    const escaped = `${String(prefix).replace(/[\\%_]/g, char => `\\${char}`)}%`
+    return stmtDeleteMetaPrefix.run(escaped).changes
   }
 
   function listDatesWithMessages(scope = 'default') {
@@ -461,6 +504,7 @@ export function createMemoryStore(dbPath) {
       scope: patch.scope ?? prev?.scope ?? 'default',
       parentSessionId: patch.parentSessionId !== undefined ? patch.parentSessionId : (prev?.parentSessionId ?? null),
       memoryMode: patch.memoryMode ?? prev?.memoryMode ?? 'full',
+      sceneMode: patch.sceneMode !== undefined ? patch.sceneMode : (prev?.sceneMode ?? null),
       lastSeq: patch.lastSeq !== undefined ? patch.lastSeq : (prev?.lastSeq ?? -1),
       replaceGeneration: patch.replaceGeneration !== undefined ? patch.replaceGeneration : (prev?.replaceGeneration ?? 0),
       bufferCursor: patch.bufferCursor !== undefined ? patch.bufferCursor : (prev?.bufferCursor ?? null),
@@ -477,6 +521,7 @@ export function createMemoryStore(dbPath) {
       next.scope,
       next.parentSessionId,
       next.memoryMode,
+      next.sceneMode,
       next.lastSeq,
       next.replaceGeneration,
       next.bufferCursor,
@@ -489,6 +534,86 @@ export function createMemoryStore(dbPath) {
 
   function setSessionMode(sessionId, memoryMode, updatedAt = Date.now()) {
     return upsertSessionState(sessionId, { memoryMode, updatedAt })
+  }
+
+  function setSessionScene(sessionId, sceneMode, updatedAt = Date.now()) {
+    if (sceneMode !== null && sceneMode !== 'work' && sceneMode !== 'chat') {
+      throw new Error(`Invalid scene mode: ${sceneMode}`)
+    }
+    return upsertSessionState(sessionId, { sceneMode, updatedAt })
+  }
+
+  function getEffectiveScene(sessionId, defaultScene = 'work') {
+    if (!sessionId) return defaultScene || 'work'
+    return getSessionState(sessionId)?.sceneMode || defaultScene || 'work'
+  }
+
+  function upsertEmbedding({
+    docKey,
+    kind,
+    scope = 'default',
+    logicalDate = null,
+    title = '',
+    snippet = '',
+    textHash,
+    dims,
+    vectorBlob,
+    updatedAt = Date.now(),
+  }) {
+    stmtUpsertEmbedding.run(
+      String(docKey),
+      String(kind),
+      String(scope),
+      logicalDate ?? null,
+      String(title ?? ''),
+      String(snippet ?? ''),
+      String(textHash),
+      Number(dims),
+      vectorBlob,
+      updatedAt,
+    )
+  }
+
+  function listEmbeddings({ kinds, scope, dateFrom, dateTo } = {}) {
+    const where = []
+    const args = []
+    if (scope) {
+      where.push('scope = ?')
+      args.push(scope)
+    }
+    if (Array.isArray(kinds) && kinds.length > 0) {
+      where.push(`kind IN (${kinds.map(() => '?').join(', ')})`)
+      args.push(...kinds)
+    }
+    if (dateFrom) {
+      where.push('(logical_date IS NULL OR logical_date >= ?)')
+      args.push(dateFrom)
+    }
+    if (dateTo) {
+      where.push('(logical_date IS NULL OR logical_date <= ?)')
+      args.push(dateTo)
+    }
+    const sql = `SELECT * FROM embeddings${where.length > 0 ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY doc_key ASC`
+    return db.prepare(sql).all(...args).map(row => ({
+      docKey: row.doc_key,
+      kind: row.kind,
+      scope: row.scope,
+      logicalDate: row.logical_date,
+      title: row.title,
+      snippet: row.snippet,
+      textHash: row.text_hash,
+      dims: row.dims,
+      vectorBlob: row.vector,
+      updatedAt: row.updated_at,
+    }))
+  }
+
+  function deleteEmbedding(docKey) {
+    return stmtDeleteEmbedding.run(String(docKey)).changes > 0
+  }
+
+  function clearEmbeddings() {
+    return stmtClearEmbeddings.run().changes
   }
 
   function resetSessionDeltaCursor(sessionId, replaceGeneration, updatedAt = Date.now(), memoryMode) {
@@ -551,6 +676,13 @@ export function createMemoryStore(dbPath) {
     db.exec('BEGIN IMMEDIATE')
     try {
       const matched = db.prepare(`SELECT id, anchor, logical_date FROM messages WHERE ${filterSql}`).all(...args)
+      if (date) {
+        db.prepare('DELETE FROM embeddings WHERE logical_date = ?').run(date)
+      }
+      if (keyword) {
+        const pat = likeEscape(keyword)
+        db.prepare("DELETE FROM embeddings WHERE snippet LIKE ? ESCAPE '\\' OR title LIKE ? ESCAPE '\\'").run(pat, pat)
+      }
       if (matched.length === 0) {
         db.exec('COMMIT')
         return { deletedCount: 0, deletedAnchors: [], affectedDates: [] }
@@ -590,11 +722,18 @@ export function createMemoryStore(dbPath) {
     getMeta,
     setMeta,
     deleteMeta,
+    deleteMetaByPrefix,
     listDatesWithMessages,
     searchMessages,
     getSessionState,
     upsertSessionState,
     setSessionMode,
+    setSessionScene,
+    getEffectiveScene,
+    upsertEmbedding,
+    listEmbeddings,
+    deleteEmbedding,
+    clearEmbeddings,
     resetSessionDeltaCursor,
     getRolloverState,
     setRolloverState,

@@ -26,6 +26,21 @@
       ]
     }
   ],
+  "lessons": [
+    {
+      "name": "容器发布与数据库迁移规范",
+      "tags": ["deploy", "database"],
+      "triggers": ["容器部署", "数据库迁移"],
+      "entries": [
+        {
+          "content": "触发场景：容器化上线前需要调整表结构 → 推荐做法：必须先运行 prisma migrate deploy 并在预演环境核验，严禁跳过沙箱直连生产。",
+          "added": "2026-11-20",
+          "source": "chat://2026-11-20#main#3",
+          "pinned": true
+        }
+      ]
+    }
+  ],
   "journals": [
     {
       "date": "2026-10-08",
@@ -34,6 +49,10 @@
     {
       "date": "2026-11-12",
       "markdown": "# 2026-11-12 日报\n\n## 发生了什么\n- [chat://2026-11-12#main#7] 同步巡检时间，老王每周二 16:00 主持巡检例会。\n\n## 做出的决定\n- [chat://2026-11-12#main#10] 正式改口：取消周五 17:00 发版，以后统一改为周三下午 15:00 发版。\n\n## 新建/变更的事项\n- （无）\n\n## 纠正与教训\n- [chat://2026-11-12#main#12] 用户纠正：严禁跳过单测直接提交 PR，必须先跑通全部单测。\n\n## 悬而未决的问题\n- （无）\n\n## 提到的实体\n- 老王, 网关项目"
+    },
+    {
+      "date": "2026-11-23",
+      "markdown": "# 2026-11-23 日报\n\n## 发生了什么\n- 例行检查了构建流水线与静态资源打包速度，对多个无关日志目录做了一次临时盘点。\n- 记录若干常规巡检流水账用于测试超长日报段落优先级保留与尾部纠偏防截断能力。\n\n## 做出的决定\n- [chat://2026-11-23#main#5] 保持核心配置项热更新兼容。\n\n## 新建/变更的事项\n- （无）\n\n## 纠正与教训\n- [chat://2026-11-23#main#9] 触发场景：清理历史归档前 → 必须做法：先执行 sqlite .backup 快照，禁止直接 rm 删除数据库文件。\n\n## 悬而未决的问题\n- 待评估夜间批处理窗口时长。\n\n## 提到的实体\n- （无）"
     },
     {
       "date": "2026-11-24",
@@ -105,6 +124,20 @@
       "question": "昨天决定的网关测试凭据应该怎么传递？",
       "expectedFacts": ["GATEWAY_TEST_TOKEN"],
       "goldMemory": "临时测试密钥统一通过环境变量 GATEWAY_TEST_TOKEN 传递，不写入文档。"
+    },
+    {
+      "id": "synonym_paraphrase_deploy",
+      "category": "synonym",
+      "question": "k8s ship rollout sql table schema migration precautions?",
+      "expectedFacts": ["prisma migrate deploy", "沙箱"],
+      "goldMemory": "容器化上线前需要调整表结构时，必须先运行 prisma migrate deploy 并在预演环境核验，严禁跳过沙箱直连生产。"
+    },
+    {
+      "id": "long_journal_tail_lesson",
+      "category": "long-journal",
+      "question": "清理历史归档 sqlite .backup 之前有什么规矩？",
+      "expectedFacts": ["sqlite .backup", "禁止直接 rm"],
+      "goldMemory": "清理历史归档前必须先执行 sqlite .backup 快照，禁止直接 rm 删除数据库文件。"
     }
   ]
 }

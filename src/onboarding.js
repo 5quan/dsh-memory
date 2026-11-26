@@ -1,4 +1,4 @@
-import { checkDuplicateContent, detectSecret } from './guard.js'
+import { checkDuplicateContent, detectPromptInjection, detectSecret } from './guard.js'
 import { clipText, estimateTokens, logicalDateOf } from './util.js'
 
 export const ONBOARDING_DIMENSIONS = [
@@ -264,11 +264,24 @@ export function createOnboardingApi({
       if (secret.detected) {
         return { ok: false, reason: secret.code, kind: secret.kind, message: secret.message }
       }
+      if (config?.guard?.blockPromptInjection !== false) {
+        const inj = detectPromptInjection(item.content)
+        if (inj.detected) {
+          return { ok: false, reason: inj.code, kind: inj.kind, message: inj.message }
+        }
+      }
     }
     for (const ent of entityItems) {
-      const secret = detectSecret(`${ent.name} ${ent.content}`)
+      const text = `${ent.name} ${ent.content}`
+      const secret = detectSecret(text)
       if (secret.detected) {
         return { ok: false, reason: secret.code, kind: secret.kind, message: secret.message }
+      }
+      if (config?.guard?.blockPromptInjection !== false) {
+        const inj = detectPromptInjection(text)
+        if (inj.detected) {
+          return { ok: false, reason: inj.code, kind: inj.kind, message: inj.message }
+        }
       }
     }
 
